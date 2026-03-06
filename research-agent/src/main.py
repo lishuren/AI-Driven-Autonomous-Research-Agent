@@ -3,6 +3,8 @@ main.py – Entry point for the Autonomous Research Agent.
 
 Usage:
     python -m src.main --topic "Stock Trading Strategies" --hours 8
+    python -m src.main --topic "Stock Trading Strategies" --duration 10m
+    python -m src.main --topic "Stock Trading Strategies" --duration 1h30m
 
 The controller implements a robust asyncio event loop that:
 - Runs for the specified duration (default 8 hours).
@@ -17,6 +19,7 @@ import argparse
 import asyncio
 import logging
 import random
+import re
 import sys
 import time
 from pathlib import Path
@@ -39,6 +42,44 @@ _CYCLE_SLEEP_MAX = 5.0
 _QUEUE_REFRESH_EVERY = 10  # refill queue every N approved findings
 
 
+def _parse_duration(value: str) -> float:
+    """Parse a human-readable duration string and return total seconds.
+
+    Supported formats (case-insensitive):
+        ``30s``       → 30 seconds
+        ``10m``       → 10 minutes
+        ``1h``        → 1 hour
+        ``1h30m``     → 1 hour 30 minutes
+        ``1h30m45s``  → 1 hour 30 minutes 45 seconds
+        ``90min``     → 90 minutes
+        ``2hrs``      → 2 hours
+
+    Raises:
+        argparse.ArgumentTypeError: if the string cannot be parsed.
+    """
+    pattern = re.compile(
+        r"^(?:(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h))?"
+        r"(?:(\d+(?:\.\d+)?)\s*(?:minutes?|mins?|m))?"
+        r"(?:(\d+(?:\.\d+)?)\s*(?:seconds?|secs?|s))?$",
+        re.IGNORECASE,
+    )
+    match = pattern.match(value.strip())
+    if not match or not any(match.groups()):
+        raise argparse.ArgumentTypeError(
+            f"Invalid duration {value!r}. "
+            "Use formats like '10m', '1h', '1h30m', '90s'."
+        )
+    hours = float(match.group(1) or 0)
+    minutes = float(match.group(2) or 0)
+    seconds = float(match.group(3) or 0)
+    total = hours * 3600 + minutes * 60 + seconds
+    if total <= 0:
+        raise argparse.ArgumentTypeError(
+            f"Duration must be greater than zero, got {value!r}."
+        )
+    return total
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Autonomous Research Agent – runs for a set duration."
@@ -49,11 +90,22 @@ def _parse_args() -> argparse.Namespace:
         required=True,
         help="High-level research topic (e.g. 'Stock Trading Strategies').",
     )
-    parser.add_argument(
+    duration_group = parser.add_mutually_exclusive_group()
+    duration_group.add_argument(
         "--hours",
         type=float,
-        default=_DEFAULT_HOURS,
-        help=f"How many hours to run (default: {_DEFAULT_HOURS}).",
+        default=None,
+        help="Number of hours to run. If neither --hours nor --duration is specified, "
+             f"defaults to {_DEFAULT_HOURS} hours. Cannot be used together with --duration.",
+    )
+    duration_group.add_argument(
+        "--duration",
+        type=_parse_duration,
+        default=None,
+        metavar="DURATION",
+        help="How long to run, as a human-readable string "
+             "(e.g. '10m', '1h', '1h30m', '90s'). "
+             "Cannot be used together with --hours.",
     )
     parser.add_argument(
         "--model",
@@ -173,7 +225,12 @@ async def run(
 
 def main() -> None:
     args = _parse_args()
-    duration = args.hours * 3600
+    if args.duration is not None:
+        duration = args.duration
+    elif args.hours is not None:
+        duration = args.hours * 3600
+    else:
+        duration = _DEFAULT_HOURS * 3600
 
     # Ensure report and data directories exist relative to CWD
     Path(args.reports_dir).mkdir(parents=True, exist_ok=True)
