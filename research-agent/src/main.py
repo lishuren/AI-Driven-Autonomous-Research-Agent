@@ -4,7 +4,12 @@ main.py – Entry point for the Autonomous Research Agent.
 Usage:
     python -m src.main --topic "Stock Trading Strategies" --hours 8
     python -m src.main --topic "Stock Trading Strategies" --duration 10m
-    python -m src.main --topic "Stock Trading Strategies" --duration 1h30m
+    python -m src.main --requirements-file requirements.md --duration 1h30m
+
+The ``--requirements-file`` option accepts a plain-text or Markdown file that
+contains the full research specification, including research details and output
+expectations.  This is the recommended approach for complex, multi-section
+requirements that are too long to fit comfortably on the command line.
 
 The controller implements a robust asyncio event loop that:
 - Runs for the specified duration (default 8 hours).
@@ -23,6 +28,7 @@ import re
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 from src.agent_manager import AgentManager
 
@@ -84,11 +90,23 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Autonomous Research Agent – runs for a set duration."
     )
-    parser.add_argument(
+    topic_group = parser.add_mutually_exclusive_group(required=True)
+    topic_group.add_argument(
         "--topic",
         type=str,
-        required=True,
-        help="High-level research topic (e.g. 'Stock Trading Strategies').",
+        default=None,
+        help="High-level research topic as inline text "
+             "(e.g. 'Stock Trading Strategies'). "
+             "Use --requirements-file for longer specifications.",
+    )
+    topic_group.add_argument(
+        "--requirements-file",
+        type=str,
+        default=None,
+        metavar="FILE",
+        help="Path to a plain-text or Markdown file containing the full "
+             "research specification (research details and output expectations). "
+             "The file name stem is used as the report title.",
     )
     duration_group = parser.add_mutually_exclusive_group()
     duration_group.add_argument(
@@ -137,6 +155,7 @@ def _parse_args() -> argparse.Namespace:
 async def run(
     topic: str,
     duration_seconds: float,
+    title: Optional[str] = None,
     model: str = "llama3",
     ollama_base_url: str = "http://localhost:11434",
     reports_dir: str = "data/reports",
@@ -150,6 +169,7 @@ async def run(
 
     manager = AgentManager(
         topic=topic,
+        title=title,
         model=model,
         ollama_base_url=ollama_base_url,
         reports_dir=reports_dir,
@@ -232,13 +252,25 @@ def main() -> None:
     else:
         duration = _DEFAULT_HOURS * 3600
 
+    # Resolve topic and title from --topic or --requirements-file
+    if args.requirements_file is not None:
+        req_path = Path(args.requirements_file)
+        if not req_path.is_file():
+            sys.exit(f"Requirements file not found: {args.requirements_file!r}")
+        topic = req_path.read_text(encoding="utf-8").strip()
+        report_title: Optional[str] = req_path.stem
+    else:
+        topic = args.topic
+        report_title = None
+
     # Ensure report and data directories exist relative to CWD
     Path(args.reports_dir).mkdir(parents=True, exist_ok=True)
     Path(args.db_path).parent.mkdir(parents=True, exist_ok=True)
 
     asyncio.run(
         run(
-            topic=args.topic,
+            topic=topic,
+            title=report_title,
             duration_seconds=duration,
             model=args.model,
             ollama_base_url=args.ollama_url,

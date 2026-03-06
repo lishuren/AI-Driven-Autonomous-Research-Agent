@@ -56,23 +56,53 @@ pip install -r requirements.txt
 ### 3. Run
 
 ```bash
-# Research "Stock Trading Strategies" for 8 hours
+# Research "Stock Trading Strategies" for 8 hours (inline topic)
 python -m src.main --topic "Stock Trading Strategies"
+
+# Use a requirements file with full research spec and output expectations
+python -m src.main --requirements-file requirements.md
 
 # Short 30-minute run with a different model
 python -m src.main --topic "Reinforcement Learning" --hours 0.5 --model mistral
+
+# Requirements file with a custom duration
+python -m src.main --requirements-file requirements.md --duration 1h30m
+```
+
+#### Requirements File Format
+
+For complex research tasks, create a plain-text or Markdown file that contains
+the full specification.  The file name stem (e.g. `requirements` for
+`requirements.md`) is used as the report title and output file name.
+
+```markdown
+## Research Detail
+Research algorithmic trading strategies based on the RSI indicator.
+Cover the mathematical formula, Python implementation using pandas/numpy,
+back-testing methodology, and known pitfalls.
+
+## Output Expectations
+- Python code that calculates RSI from OHLCV data.
+- Step-by-step pseudocode for the trading signal logic.
+- LaTeX-formatted mathematical formulas.
+- List of all required Python libraries.
+- References to authoritative sources.
 ```
 
 #### CLI Options
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--topic` | *(required)* | High-level research topic |
+| `--topic` | *(required\*)* | High-level research topic as inline text |
+| `--requirements-file` | *(required\*)* | Path to a file with the full research specification |
 | `--hours` | `8` | How long to run |
+| `--duration` | — | Human-readable duration (e.g. `10m`, `1h30m`) |
 | `--model` | `llama3` | Ollama model name |
 | `--ollama-url` | `http://localhost:11434` | Ollama base URL |
 | `--reports-dir` | `data/reports` | Output directory for Markdown reports |
 | `--db-path` | `data/research.db` | SQLite database path |
+
+\* Exactly one of `--topic` or `--requirements-file` is required.
 
 ## Output Format
 

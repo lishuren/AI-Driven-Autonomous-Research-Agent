@@ -181,3 +181,27 @@ class TestAgentManager:
         content = report_path.read_text()
         assert "RSI Strategy" in content
         assert "RSI formula" in content
+
+    def test_generate_report_uses_title_for_filename(self, tmp_reports, tmp_db):
+        """When a title is provided it is used for the report file name and heading."""
+        from src.agent_manager import AgentManager
+
+        with patch("src.agent_manager.PlannerAgent"), \
+             patch("src.agent_manager.ResearcherAgent"), \
+             patch("src.agent_manager.CriticAgent"), \
+             patch("src.agent_manager.KnowledgeBase"):
+            manager = AgentManager(
+                topic="## Research\nFull spec…\n\n## Output\nPython code.",
+                title="my_spec",
+                reports_dir=tmp_reports,
+                db_path=tmp_db,
+            )
+
+        manager._approved = []
+        report_path = manager.generate_report()
+
+        assert report_path.name == "my_spec.md"
+        content = report_path.read_text()
+        assert "my_spec" in content
+        # The long spec text should NOT appear as the report heading
+        assert "## Research" not in content.split("\n")[0]

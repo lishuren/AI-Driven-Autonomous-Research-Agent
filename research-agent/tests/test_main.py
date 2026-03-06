@@ -1,12 +1,13 @@
 """
 Tests for main.py – specifically the _parse_duration helper and
-the argument-parsing logic around --hours / --duration.
+the argument-parsing logic around --hours / --duration / --requirements-file.
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -112,6 +113,86 @@ class TestArgParseDuration:
     def test_hours_and_duration_mutually_exclusive(self):
         with pytest.raises(SystemExit):
             self._parse(["--hours", "1", "--duration", "10m"])
+
+    def test_no_topic_or_requirements_file_raises(self):
+        from src.main import _parse_args
+
+        with patch("sys.argv", ["prog"]):
+            with pytest.raises(SystemExit):
+                _parse_args()
+
+    def test_topic_and_requirements_file_mutually_exclusive(self, tmp_path):
+        req_file = tmp_path / "spec.md"
+        req_file.write_text("research detail", encoding="utf-8")
+        from src.main import _parse_args
+
+        with patch(
+            "sys.argv",
+            ["prog", "--topic", "Test", "--requirements-file", str(req_file)],
+        ):
+            with pytest.raises(SystemExit):
+                _parse_args()
+
+
+class TestRequirementsFile:
+    """Tests for --requirements-file argument parsing and loading."""
+
+    def test_requirements_file_stored_in_namespace(self, tmp_path):
+        req_file = tmp_path / "my_spec.md"
+        req_file.write_text("research spec content", encoding="utf-8")
+        from src.main import _parse_args
+
+        with patch("sys.argv", ["prog", "--requirements-file", str(req_file)]):
+            args = _parse_args()
+
+        assert args.requirements_file == str(req_file)
+        assert args.topic is None
+
+    def test_topic_stored_in_namespace(self):
+        from src.main import _parse_args
+
+        with patch("sys.argv", ["prog", "--topic", "RSI Strategy"]):
+            args = _parse_args()
+
+        assert args.topic == "RSI Strategy"
+        assert args.requirements_file is None
+
+    def test_main_reads_requirements_file(self, tmp_path, monkeypatch):
+        """main() should read the file and pass its content as the topic."""
+        req_file = tmp_path / "spec.md"
+        spec_content = "## Research\nAnalyse RSI.\n\n## Output\nPython code."
+        req_file.write_text(spec_content, encoding="utf-8")
+
+        captured: dict = {}
+
+        async def fake_run(topic, duration_seconds, title=None, **kwargs):
+            captured["topic"] = topic
+            captured["title"] = title
+
+        monkeypatch.setattr("src.main.run", fake_run)
+        monkeypatch.setattr("src.main.Path.mkdir", lambda *a, **kw: None)
+
+        with patch(
+            "sys.argv",
+            ["prog", "--requirements-file", str(req_file), "--duration", "1s"],
+        ):
+            from src.main import main
+            main()
+
+        assert captured["topic"] == spec_content
+        assert captured["title"] == "spec"
+
+    def test_main_missing_requirements_file_exits(self, tmp_path, monkeypatch):
+        """main() should exit with an error if the file does not exist."""
+        missing = tmp_path / "nonexistent.md"
+
+        with patch(
+            "sys.argv",
+            ["prog", "--requirements-file", str(missing), "--duration", "1s"],
+        ):
+            with pytest.raises(SystemExit):
+                from src.main import main
+                main()
 
 
 class TestMainDurationResolution:
