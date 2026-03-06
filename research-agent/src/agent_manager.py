@@ -47,12 +47,14 @@ class AgentManager:
     def __init__(
         self,
         topic: str,
+        title: Optional[str] = None,
         model: str = "llama3",
         ollama_base_url: str = "http://localhost:11434",
         reports_dir: str = "data/reports",
         db_path: str = "data/research.db",
     ) -> None:
         self.topic = topic
+        self._title = title if title is not None else topic
         self.reports_dir = Path(reports_dir)
         self.reports_dir.mkdir(parents=True, exist_ok=True)
 
@@ -170,7 +172,7 @@ class AgentManager:
 
     def generate_report(self) -> Path:
         """Consolidate all approved findings into a Markdown report."""
-        safe_name = re.sub(r"[^\w\-]", "_", self.topic.lower())
+        safe_name = re.sub(r"[^\w\-]", "_", self._title.lower())
         report_path = self.reports_dir / f"{safe_name}.md"
 
         logic_steps = []
@@ -195,7 +197,7 @@ class AgentManager:
             sources.extend(finding.get("source_urls", []))
 
         content = _REPORT_TEMPLATE.format(
-            topic=self.topic,
+            topic=self._title,
             logic_steps="\n".join(logic_steps) or "No approved steps yet.",
             formulas="\n".join(formulas) or "_No formulas extracted._",
             dependencies="\n".join(f"- `{d}`" for d in sorted(deps))
