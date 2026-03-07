@@ -67,7 +67,7 @@ class ScraperTool:
                     browser = await pw.chromium.launch(headless=True)
                     try:
                         page = await browser.new_page()
-                        await page.goto(url, timeout=_PAGE_TIMEOUT, wait_until="networkidle")
+                        await page.goto(url, timeout=_PAGE_TIMEOUT, wait_until="domcontentloaded")
                         content = await page.inner_text("body")
                     finally:
                         await browser.close()
