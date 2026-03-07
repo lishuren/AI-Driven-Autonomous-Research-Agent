@@ -26,15 +26,8 @@ logger = logging.getLogger(__name__)
 _REPORT_TEMPLATE = """\
 # {topic}
 
-## Implementation Logic
-{logic_steps}
-
-## Math/Formulas
-{formulas}
-
-## Dependencies
-{dependencies}
-
+{findings}
+{technical_sections}
 ## Sources
 {sources}
 """
@@ -228,33 +221,47 @@ class AgentManager:
         safe_name = re.sub(r"[^\w\-]", "_", self._title.lower())
         report_path = self.reports_dir / f"{safe_name}.md"
 
-        logic_steps = []
+        finding_sections: list[str] = []
         formulas: list[str] = []
         deps: set[str] = set()
         sources: list[str] = []
 
-        for i, finding in enumerate(self._approved, start=1):
+        for finding in self._approved:
             summary = finding.get("summary", "")
-            logic_steps.append(f"{i}. **{finding['subtopic']}** – {summary[:300]}…")
+            subtopic = finding["subtopic"]
+            finding_sections.append(f"### {subtopic}\n\n{summary}")
 
-            # Extract LaTeX-style formulas
+            # Extract LaTeX-style formulas (technical topics)
             for match in re.finditer(r"\$\$.*?\$\$|\$[^$\n]+\$", summary):
                 formulas.append(match.group())
 
-            # Extract library names
-            for match in re.finditer(
-                r"\b(import|from)\s+([\w.]+)", summary
-            ):
+            # Extract Python library names (technical topics)
+            for match in re.finditer(r"\b(import|from)\s+([\w.]+)", summary):
                 deps.add(match.group(2).split(".")[0])
 
             sources.extend(finding.get("source_urls", []))
 
+        # Build the findings block
+        if finding_sections:
+            findings_block = "## Findings\n\n" + "\n\n---\n\n".join(finding_sections)
+        else:
+            findings_block = "## Findings\n\n_No approved findings yet._"
+
+        # Only include technical sections when there is actual content
+        technical_parts: list[str] = []
+        if formulas:
+            technical_parts.append("## Math/Formulas\n\n" + "\n".join(formulas))
+        if deps:
+            technical_parts.append(
+                "## Dependencies\n\n"
+                + "\n".join(f"- `{d}`" for d in sorted(deps))
+            )
+        technical_sections = ("\n\n".join(technical_parts) + "\n\n") if technical_parts else ""
+
         content = _REPORT_TEMPLATE.format(
             topic=self._title,
-            logic_steps="\n".join(logic_steps) or "No approved steps yet.",
-            formulas="\n".join(formulas) or "_No formulas extracted._",
-            dependencies="\n".join(f"- `{d}`" for d in sorted(deps))
-            or "_No dependencies extracted._",
+            findings=findings_block,
+            technical_sections=technical_sections,
             sources="\n".join(f"- {s}" for s in sources) or "_No sources._",
         )
 

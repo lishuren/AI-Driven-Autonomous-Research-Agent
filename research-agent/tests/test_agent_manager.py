@@ -181,6 +181,12 @@ class TestAgentManager:
         content = report_path.read_text()
         assert "RSI Strategy" in content
         assert "RSI formula" in content
+        # Topic-neutral structure: findings section, no hardcoded technical headings
+        assert "## Findings" in content
+        # Technical sections only appear when content exists
+        assert "## Math/Formulas" in content   # formula present in summary
+        assert "## Dependencies" in content    # 'import pandas' in summary
+        assert "## Implementation Logic" not in content
 
     def test_generate_report_uses_title_for_filename(self, tmp_reports, tmp_db):
         """When a title is provided it is used for the report file name and heading."""
