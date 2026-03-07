@@ -139,8 +139,9 @@ back-testing methodology, and known pitfalls.
 | `--duration` | — | Human-readable duration (e.g. `10m`, `1h30m`) |
 | `--model` | `qwen2.5:7b` | Requested Ollama model name. If unavailable locally, runtime falls back to an installed model and logs a warning. |
 | `--ollama-url` | `http://localhost:11434` | Ollama base URL |
-| `--reports-dir` | `data/reports` | Output directory for Markdown reports |
-| `--db-path` | `data/research.db` | SQLite database path |
+| `--data-dir` | — | Base data directory. If specified, overrides `--reports-dir` and `--db-path` defaults (e.g., `--data-dir /custom/path` uses `/custom/path/reports` and `/custom/path/research.db`) |
+| `--reports-dir` | `data/reports` | Output directory for Markdown reports (overridden by `--data-dir` if specified) |
+| `--db-path` | `data/research.db` | SQLite database path (overridden by `--data-dir` if specified) |
 
 \* Exactly one of `--topic` or `--requirements-file` is required.
 
