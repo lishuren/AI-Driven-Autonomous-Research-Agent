@@ -20,7 +20,8 @@ logger = logging.getLogger(__name__)
 
 _CRITIC_PROMPT = """You are a Senior Research Quality Auditor.
 
-Review the following research summary for the task: "{task}"
+Original research topic: "{topic}"
+Subtask being evaluated: "{task}"
 
 ASSESSMENT RULES:
 - For TECHNICAL topics (code, algorithms, math): Check for logical steps, formulas, and library dependencies
@@ -30,7 +31,7 @@ ASSESSMENT RULES:
 Evaluate:
 1. Logical Steps / Clear Structure? (explanation or algorithm present)
 2. Specific Details? (concrete facts, not vague)
-3. Relevant to Task? (directly addresses what was asked)
+3. Relevant to Task? (directly addresses what was asked for the original research topic — content about an unrelated subject must be REJECTED)
 
 Decision rules:
 - If ALL three checks are YES → output status: PROCEED
@@ -154,8 +155,13 @@ class CriticAgent:
                 pass
         return None
 
-    async def review(self, task: str, summary: str) -> dict[str, Any]:
+    async def review(self, task: str, summary: str, topic: str = "") -> dict[str, Any]:
         """Evaluate *summary* for research quality.
+
+        *topic* is the original user research topic (e.g. "Westworld TV Series").
+        When provided it anchors the relevance check so off-topic content from
+        ambiguous queries (e.g. "S3" resolved to Amazon S3 instead of Season 3)
+        is correctly rejected.
 
         Returns a dict with at minimum:
         ``{'status': 'PROCEED'|'REJECT', 'missing': str}``.
@@ -171,7 +177,7 @@ class CriticAgent:
                 "missing": "Empty summary – no content was retrieved.",
             }
 
-        prompt = _CRITIC_PROMPT.format(task=task, summary=summary[:6000])
+        prompt = _CRITIC_PROMPT.format(topic=topic or task, task=task, summary=summary[:6000])
 
         loop = asyncio.get_event_loop()
         raw = await loop.run_in_executor(None, self._call_ollama, prompt)

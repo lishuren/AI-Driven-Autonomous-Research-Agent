@@ -144,7 +144,7 @@ class AgentManager:
                 return None
 
             # Critic review
-            verdict = await self._critic.review(task["subtopic"], result["summary"])
+            verdict = await self._critic.review(task["subtopic"], result["summary"], topic=self.topic)
 
             if verdict.get("status") == "PROCEED":
                 # Save to knowledge base

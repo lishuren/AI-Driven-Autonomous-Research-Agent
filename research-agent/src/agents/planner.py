@@ -34,7 +34,7 @@ Rules:
 - Queries must be 2-6 words maximum.
 
 Examples:
-  Topic "Westworld TV Series S3 and S4"  →  "Westworld S3 plot", "Westworld S4 cast"
+  Topic "Westworld TV Series S3 and S4"  →  "Westworld season 3 plot", "Westworld season 4 cast"
   Topic "RSI trading indicator"          →  "RSI indicator formula", "RSI trading python"
   Topic "React framework hooks"          →  "React hooks tutorial", "React framework example"
 
