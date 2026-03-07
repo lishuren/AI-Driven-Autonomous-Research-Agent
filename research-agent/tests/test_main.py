@@ -225,3 +225,75 @@ class TestMainDurationResolution:
 
     def test_duration_combined(self):
         assert self._run_main_duration(["--duration", "1h30m"]) == 5400.0
+
+
+class TestProgressiveReportSave:
+    """Tests that the run() loop saves the report after every approved finding."""
+
+    def test_report_saved_after_each_finding(self, event_loop, tmp_path):
+        """generate_report() should be called once per approved finding."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from src.main import run
+
+        reports_dir = str(tmp_path / "reports")
+        db_path = str(tmp_path / "research.db")
+
+        # Build a minimal AgentManager mock that yields one finding then stops.
+        mock_manager = MagicMock()
+        mock_manager.init = AsyncMock()
+        mock_manager.close = AsyncMock()
+        mock_manager.has_tasks = MagicMock(return_value=True)
+        mock_manager.populate_queue = AsyncMock()
+
+        finding = {"subtopic": "RL policy", "query": "policy gradient", "source_urls": []}
+        # First call returns a finding; subsequent calls return None to idle out.
+        mock_manager.run_cycle = AsyncMock(side_effect=[finding, None, None, None, None])
+        mock_manager.generate_report = MagicMock(
+            return_value=tmp_path / "reports" / "test.md"
+        )
+
+        with patch("src.main.AgentManager", return_value=mock_manager), \
+             patch("src.main._list_ollama_models", return_value=[]):
+            event_loop.run_until_complete(
+                run(
+                    topic="Reinforcement Learning",
+                    duration_seconds=2,
+                    reports_dir=reports_dir,
+                    db_path=db_path,
+                )
+            )
+
+        # generate_report() called: once for the finding + once in the finally block
+        assert mock_manager.generate_report.call_count >= 2
+
+    def test_report_saved_on_interrupt(self, event_loop, tmp_path):
+        """generate_report() is called in the finally block even on KeyboardInterrupt."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from src.main import run
+
+        reports_dir = str(tmp_path / "reports")
+        db_path = str(tmp_path / "research.db")
+
+        mock_manager = MagicMock()
+        mock_manager.init = AsyncMock()
+        mock_manager.close = AsyncMock()
+        mock_manager.has_tasks = MagicMock(return_value=True)
+        mock_manager.populate_queue = AsyncMock()
+        mock_manager.run_cycle = AsyncMock(side_effect=KeyboardInterrupt)
+        mock_manager.generate_report = MagicMock(
+            return_value=tmp_path / "reports" / "test.md"
+        )
+
+        with patch("src.main.AgentManager", return_value=mock_manager), \
+             patch("src.main._list_ollama_models", return_value=[]):
+            with pytest.raises(KeyboardInterrupt):
+                event_loop.run_until_complete(
+                    run(
+                        topic="Reinforcement Learning",
+                        duration_seconds=60,
+                        reports_dir=reports_dir,
+                        db_path=db_path,
+                    )
+                )
+
+        mock_manager.generate_report.assert_called_once()

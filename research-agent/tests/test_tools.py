@@ -87,3 +87,86 @@ class TestScraperTool:
             result = event_loop.run_until_complete(tool.scrape("https://bad.url"))
 
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# SearchLogger
+# ---------------------------------------------------------------------------
+
+class TestSearchLogger:
+    def setup_method(self):
+        """Reset SearchLogger state before each test."""
+        from src.tools.search_tool import SearchLogger
+        SearchLogger.close()
+
+    def teardown_method(self):
+        """Ensure the logger is closed after each test."""
+        from src.tools.search_tool import SearchLogger
+        SearchLogger.close()
+
+    def test_disabled_by_default(self, event_loop, tmp_path):
+        """SearchLogger should not write anything unless enabled."""
+        from src.tools.search_tool import SearchTool, SearchLogger
+
+        log_path = tmp_path / "search.jsonl"
+        fake_results = [{"title": "T", "url": "https://example.com", "body": "b"}]
+
+        with patch("src.tools.search_tool._search_sync", return_value=fake_results):
+            tool = SearchTool()
+            tool._last_call = 0.0
+            event_loop.run_until_complete(tool.search("test query"))
+
+        assert not log_path.exists()
+
+    def test_writes_entry_when_enabled(self, event_loop, tmp_path):
+        """SearchLogger should write a JSONL entry for each search when enabled."""
+        import json
+        from src.tools.search_tool import SearchTool, SearchLogger
+
+        log_path = tmp_path / "search.jsonl"
+        SearchLogger.enable(str(log_path))
+
+        fake_results = [
+            {"title": "T1", "url": "https://example.com/page", "body": "b1"},
+            {"title": "T2", "url": "https://other.org/post", "body": "b2"},
+        ]
+
+        with patch("src.tools.search_tool._search_sync", return_value=fake_results):
+            tool = SearchTool()
+            tool._last_call = 0.0
+            event_loop.run_until_complete(tool.search("RL policy gradient"))
+
+        SearchLogger.close()
+
+        lines = log_path.read_text().strip().splitlines()
+        assert len(lines) == 1
+        entry = json.loads(lines[0])
+        assert entry["query"] == "RL policy gradient"
+        assert entry["result_count"] == 2
+        assert "example.com" in entry["domains"]
+        assert "other.org" in entry["domains"]
+        assert "ts" in entry
+
+    def test_multiple_searches_append(self, event_loop, tmp_path):
+        """Each search call appends a separate line."""
+        import json
+        from src.tools.search_tool import SearchTool, SearchLogger
+
+        log_path = tmp_path / "search.jsonl"
+        SearchLogger.enable(str(log_path))
+
+        fake_results = [{"title": "T", "url": "https://example.com", "body": "b"}]
+
+        with patch("src.tools.search_tool._search_sync", return_value=fake_results):
+            tool = SearchTool()
+            tool._last_call = 0.0
+            event_loop.run_until_complete(tool.search("query one"))
+            tool._last_call = 0.0
+            event_loop.run_until_complete(tool.search("query two"))
+
+        SearchLogger.close()
+
+        lines = log_path.read_text().strip().splitlines()
+        assert len(lines) == 2
+        assert json.loads(lines[0])["query"] == "query one"
+        assert json.loads(lines[1])["query"] == "query two"
