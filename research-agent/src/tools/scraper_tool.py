@@ -18,7 +18,7 @@ from playwright.async_api import async_playwright
 
 logger = logging.getLogger(__name__)
 
-_PAGE_TIMEOUT = 30_000  # milliseconds — covers slow JS-heavy pages
+_PAGE_TIMEOUT = 15_000  # milliseconds — fail fast on blocked/slow sites
 _MAX_CONTENT_CHARS = 20_000
 _RETRY_MAX_ATTEMPTS = 3
 _RETRY_BACKOFF_BASE = 1.0  # seconds

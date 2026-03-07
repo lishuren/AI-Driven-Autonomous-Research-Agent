@@ -18,7 +18,12 @@ logger = logging.getLogger(__name__)
 _RATE_LIMIT_MIN = 2.0
 _RATE_LIMIT_MAX = 5.0
 _DEFAULT_MAX_RESULTS = 5
+# Backends for the legacy `duckduckgo_search` package.
 _SEARCH_BACKENDS = ("lite", "html", "bing")
+# Backends for the newer `ddgs` package.  Omit brave/google (robot-blocked),
+# yahoo/grokipedia/wikipedia (slow / wrong result type), and duckduckgo
+# (unreliable); mojeek + yandex reliably return results.
+_SEARCH_BACKENDS_DDGS = ("mojeek", "yandex", "duckduckgo")
 _RETRY_MAX_ATTEMPTS = 3
 _RETRY_BACKOFF_BASE = 1.0  # seconds
 
@@ -90,11 +95,32 @@ def _search_sync(query: str, max_results: int) -> list[dict[str, Any]]:
                 )
                 with DDGS() as ddgs:
                     if using_new_ddgs:
-                        # `ddgs` exposes a different backend set and `auto` is usually the
-                        # most reliable cross-network option.
-                        return _normalise_results(
-                            list(ddgs.text(query, max_results=max_results))
-                        )
+                        # Use the ddgs-specific backend list — its backend names differ
+                        # from duckduckgo_search, and passing an unknown name causes the
+                        # library to silently fall back to "auto" (all engines, very slow).
+                        backend_error = None
+                        for backend in _SEARCH_BACKENDS_DDGS:
+                            try:
+                                results = list(
+                                    ddgs.text(query, max_results=max_results, backend=backend)
+                                )
+                            except TypeError:
+                                results = list(ddgs.text(query, max_results=max_results))
+                            except Exception as exc:
+                                backend_error = exc
+                                logger.info(
+                                    "Search backend %r failed for query %r: %s",
+                                    backend, query, exc,
+                                )
+                                continue
+
+                            normalised = _normalise_results(results)
+                            if normalised:
+                                return normalised
+
+                        if backend_error is not None:
+                            raise backend_error
+                        return []
 
                     backend_error: Optional[Exception] = None
                     for backend in _SEARCH_BACKENDS:

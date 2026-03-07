@@ -79,6 +79,99 @@ class TestPlannerAgent:
         assert "query" in task
         assert "RSI" in task["query"]
 
+    def test_decompose_with_good_and_bad_examples(self, event_loop):
+        """decompose() accepts good/bad example queries and still returns tasks."""
+        from src.agents.planner import PlannerAgent
+
+        llm_output = json.dumps([
+            {"subtopic": "RSI", "query": "RSI indicator python"},
+        ])
+
+        with patch("src.agents.planner._call_ollama", return_value=llm_output):
+            agent = PlannerAgent()
+            tasks = event_loop.run_until_complete(
+                agent.decompose(
+                    "Stock Trading",
+                    good_examples=["RSI formula pandas"],
+                    bad_examples=["vague market sentiment"],
+                )
+            )
+
+        assert len(tasks) == 1
+        assert tasks[0]["subtopic"] == "RSI"
+
+    def test_decompose_retrospective_returns_tasks(self, event_loop):
+        """decompose_retrospective() uses the retrospective prompt and returns tasks."""
+        from src.agents.planner import PlannerAgent
+
+        llm_output = json.dumps([
+            {"subtopic": "Bollinger alternative", "query": "bollinger bands width formula"},
+        ])
+
+        with patch("src.agents.planner._call_ollama", return_value=llm_output):
+            agent = PlannerAgent()
+            tasks = event_loop.run_until_complete(
+                agent.decompose_retrospective(
+                    "Bollinger Bands",
+                    failed_queries=["bollinger bands", "bollinger trading signal"],
+                )
+            )
+
+        assert len(tasks) == 1
+        assert "subtopic" in tasks[0]
+
+    def test_decompose_retrospective_falls_back_on_bad_response(self, event_loop):
+        """decompose_retrospective() falls back to 5 tasks on unparsable LLM output."""
+        from src.agents.planner import PlannerAgent
+
+        with patch("src.agents.planner._call_ollama", return_value="not json"):
+            agent = PlannerAgent()
+            tasks = event_loop.run_until_complete(
+                agent.decompose_retrospective("Topic", failed_queries=["q1"])
+            )
+
+        assert len(tasks) == 5
+
+    def test_pre_search_vocab_returns_words(self, event_loop):
+        """_pre_search_vocab() extracts real words from search result titles/snippets."""
+        from src.agents.planner import PlannerAgent
+        from unittest.mock import AsyncMock
+
+        mock_search_tool = MagicMock()
+        mock_search_tool.search = AsyncMock(return_value=[
+            {"title": "RSI Indicator Python Tutorial", "body": "Calculate RSI using pandas"},
+        ])
+
+        agent = PlannerAgent(search_tool=mock_search_tool)
+        vocab = event_loop.run_until_complete(agent._pre_search_vocab("RSI indicator"))
+
+        assert isinstance(vocab, list)
+        assert len(vocab) > 0
+        # common words from the title/body should appear
+        assert any(w in vocab for w in ["rsi", "indicator", "python", "pandas", "calculate"])
+
+    def test_pre_search_vocab_returns_empty_on_error(self, event_loop):
+        """_pre_search_vocab() returns [] when the search tool raises an exception."""
+        from src.agents.planner import PlannerAgent
+        from unittest.mock import AsyncMock
+
+        mock_search_tool = MagicMock()
+        mock_search_tool.search = AsyncMock(side_effect=RuntimeError("search failed"))
+
+        agent = PlannerAgent(search_tool=mock_search_tool)
+        vocab = event_loop.run_until_complete(agent._pre_search_vocab("RSI"))
+
+        assert vocab == []
+
+    def test_pre_search_vocab_returns_empty_without_tool(self, event_loop):
+        """_pre_search_vocab() returns [] when no search_tool is provided."""
+        from src.agents.planner import PlannerAgent
+
+        agent = PlannerAgent()
+        vocab = event_loop.run_until_complete(agent._pre_search_vocab("RSI"))
+
+        assert vocab == []
+
 
 # ---------------------------------------------------------------------------
 # CriticAgent
