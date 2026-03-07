@@ -62,7 +62,8 @@ All three agents communicate with a **local Ollama server** via a plain
 the HTTP level — the `ollama` package in `requirements.txt` is available but
 the agents call the REST API directly to keep IO in their own executor threads.
 
-- Default model: `llama3`
+- Requested default model: `qwen2.5:7b`
+- If the requested model is unavailable locally, runtime falls back to an installed local model and logs a warning
 - Default base URL: `http://localhost:11434`
 - Timeout: 120 s (Planner), 180 s (Researcher), 120 s (Critic)
 
@@ -99,7 +100,7 @@ Arguments:
 - `--topic` / `--requirements-file` (mutually exclusive, one required)
 - `--hours` — integer hours (default 8)
 - `--duration` — flexible format: `30s`, `10m`, `1h`, `1h30m`, `2hrs`, `90min`
-- `--model` — Ollama model name (default `llama3`)
+- `--model` — Requested Ollama model name (default `qwen2.5:7b`); falls back to an installed local model if unavailable
 - `--ollama-url` — Ollama base URL (default `http://localhost:11434`)
 - `--reports-dir` — output directory for Markdown reports
 - `--db-path` — path to SQLite database

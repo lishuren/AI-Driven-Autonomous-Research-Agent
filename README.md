@@ -4,6 +4,9 @@ A **Recursive Agentic Research Engine** that autonomously researches technical
 topics for extended periods (default: 8 hours) and produces *Code-Ready*
 Markdown specifications.
 
+Need a complete setup walkthrough from checkout to first query? See
+`USER_GUIDE.md`.
+
 ## Architecture
 
 ```
@@ -44,7 +47,7 @@ retries automatically – it never accepts vague summaries.
 
 * Python 3.10+
 * [Ollama](https://ollama.ai/) running locally (`ollama serve`)
-* A downloaded model, e.g. `ollama pull llama3`
+* At least one downloaded model, e.g. `ollama pull qwen2.5:7b` or `ollama pull llama3`
 
 ### 2. Install
 
@@ -67,7 +70,44 @@ python -m src.main --topic "Reinforcement Learning" --hours 0.5 --model mistral
 
 # Requirements file with a custom duration
 python -m src.main --requirements-file requirements.md --duration 1h30m
+
+# Explicit model selection (recommended)
+python -m src.main --topic "Reinforcement Learning" --duration 30m --model qwen2.5:7b
 ```
+
+Model resolution behavior:
+- If `--model` is available locally, it is used directly.
+- If `--model` is missing (for example `qwen2.5:7b` is requested but not pulled),
+  the app automatically falls back to an available local model and logs a warning.
+- To avoid ambiguity, pass `--model` explicitly.
+
+### Model Guide
+
+Check which models are installed locally:
+
+```bash
+ollama list
+```
+
+Run with an explicit model:
+
+```bash
+python -m src.main --topic "Reinforcement Learning" --duration 30m --model qwen2.5:7b
+python -m src.main --topic "Reinforcement Learning" --duration 30m --model llama3
+python -m src.main --topic "Reinforcement Learning" --duration 30m --model mistral
+```
+
+Typical model differences:
+
+| Model | Typical strengths | Typical trade-offs | Good fit |
+|------|-------------------|--------------------|----------|
+| `qwen2.5:7b` | Strong coding output, clear technical explanations, good speed/quality balance | Can still miss edge-case depth on highly niche topics | Default for most research runs |
+| `llama3` | Strong general reasoning and broad instruction following | May not be installed locally by default | Good all-round choice if already pulled |
+| `mistral` | Usually fast with lower resource usage | Summaries may be shorter/less detailed on complex math-heavy tasks | Faster exploratory runs |
+
+Notes:
+- Model quality/speed depends on hardware and quantization level.
+- For stable reproducibility, pin the model explicitly with `--model`.
 
 #### Requirements File Format
 
@@ -97,7 +137,7 @@ back-testing methodology, and known pitfalls.
 | `--requirements-file` | *(required\*)* | Path to a file with the full research specification |
 | `--hours` | `8` | How long to run |
 | `--duration` | — | Human-readable duration (e.g. `10m`, `1h30m`) |
-| `--model` | `llama3` | Ollama model name |
+| `--model` | `qwen2.5:7b` | Requested Ollama model name. If unavailable locally, runtime falls back to an installed model and logs a warning. |
 | `--ollama-url` | `http://localhost:11434` | Ollama base URL |
 | `--reports-dir` | `data/reports` | Output directory for Markdown reports |
 | `--db-path` | `data/research.db` | SQLite database path |

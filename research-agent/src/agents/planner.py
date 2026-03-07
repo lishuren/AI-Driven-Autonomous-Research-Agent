@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import urllib.error
 import urllib.request
 from typing import Any, Optional
 
@@ -56,7 +57,7 @@ def _call_ollama(prompt: str, model: str, base_url: str) -> Optional[str]:
         {"model": model, "prompt": prompt, "stream": False}
     ).encode()
     req = urllib.request.Request(
-        f"{base_url}/api/generate",
+        f"{base_url.rstrip('/')}/api/generate",
         data=payload,
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -65,6 +66,20 @@ def _call_ollama(prompt: str, model: str, base_url: str) -> Optional[str]:
         with urllib.request.urlopen(req, timeout=120) as resp:
             data = json.loads(resp.read())
             return data.get("response", "")
+    except urllib.error.HTTPError as exc:
+        error_text = ""
+        try:
+            payload = json.loads(exc.read().decode("utf-8", errors="ignore"))
+            if isinstance(payload, dict):
+                error_text = str(payload.get("error", ""))
+        except Exception:
+            error_text = ""
+
+        if error_text:
+            logger.warning("Ollama call failed (%s): %s", exc.code, error_text)
+        else:
+            logger.warning("Ollama call failed (%s): %s", exc.code, exc.reason)
+        return None
     except Exception as exc:
         logger.warning("Ollama call failed: %s", exc)
         return None
@@ -75,7 +90,7 @@ class PlannerAgent:
 
     def __init__(
         self,
-        model: str = "llama3",
+        model: str = "qwen2.5:7b",
         ollama_base_url: str = "http://localhost:11434",
     ) -> None:
         self.model = model
