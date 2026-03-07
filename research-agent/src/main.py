@@ -22,11 +22,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import random
 import re
 import sys
 import time
+import urllib.request
 from pathlib import Path
 from typing import Optional
 
@@ -46,6 +48,43 @@ _ERROR_SLEEP_SECONDS = 5
 _CYCLE_SLEEP_MIN = 2.0
 _CYCLE_SLEEP_MAX = 5.0
 _QUEUE_REFRESH_EVERY = 10  # refill queue every N approved findings
+_OLLAMA_TAGS_TIMEOUT_SECONDS = 10
+
+
+def _list_ollama_models(base_url: str) -> list[str]:
+    """Return local Ollama model names from /api/tags."""
+    req = urllib.request.Request(
+        f"{base_url.rstrip('/')}/api/tags",
+        method="GET",
+    )
+    with urllib.request.urlopen(req, timeout=_OLLAMA_TAGS_TIMEOUT_SECONDS) as resp:
+        payload = json.loads(resp.read())
+
+    models = payload.get("models", [])
+    if not isinstance(models, list):
+        return []
+
+    names: list[str] = []
+    for model in models:
+        if isinstance(model, dict) and isinstance(model.get("name"), str):
+            names.append(model["name"])
+    return names
+
+
+def _resolve_model_name(requested_model: str, available_models: list[str]) -> str:
+    """Resolve a usable Ollama model name from available local models."""
+    if requested_model in available_models:
+        return requested_model
+
+    # If no explicit tag was provided (e.g. `llama3`), try family match first.
+    if ":" not in requested_model:
+        for model_name in available_models:
+            if model_name.split(":", 1)[0] == requested_model:
+                return model_name
+
+    if available_models:
+        return available_models[0]
+    return requested_model
 
 
 def _parse_duration(value: str) -> float:
@@ -128,8 +167,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model",
         type=str,
-        default="llama3",
-        help="Ollama model name (default: llama3).",
+        default="qwen2.5:7b",
+        help="Requested Ollama model name (default: qwen2.5:7b). "
+             "If unavailable locally, runtime falls back to an installed model.",
     )
     parser.add_argument(
         "--ollama-url",
@@ -156,7 +196,7 @@ async def run(
     topic: str,
     duration_seconds: float,
     title: Optional[str] = None,
-    model: str = "llama3",
+    model: str = "qwen2.5:7b",
     ollama_base_url: str = "http://localhost:11434",
     reports_dir: str = "data/reports",
     db_path: str = "data/research.db",
@@ -167,10 +207,38 @@ async def run(
     cycles_completed = 0
     approved_count = 0
 
+    resolved_model = model
+    try:
+        available_models = _list_ollama_models(ollama_base_url)
+        if available_models:
+            selected_model = _resolve_model_name(model, available_models)
+            if selected_model != model:
+                logger.warning(
+                    "Requested Ollama model %r not found; using %r. "
+                    "Pull it with: ollama pull %s",
+                    model,
+                    selected_model,
+                    model,
+                )
+            resolved_model = selected_model
+        else:
+            logger.warning(
+                "No local Ollama models found at %s. Pull one with: ollama pull %s",
+                ollama_base_url,
+                model,
+            )
+    except Exception as exc:
+        logger.warning(
+            "Could not query Ollama models at %s: %s. Continuing with model %r.",
+            ollama_base_url,
+            exc,
+            model,
+        )
+
     manager = AgentManager(
         topic=topic,
         title=title,
-        model=model,
+        model=resolved_model,
         ollama_base_url=ollama_base_url,
         reports_dir=reports_dir,
         db_path=db_path,
@@ -178,9 +246,10 @@ async def run(
 
     await manager.init()
     logger.info(
-        "Research session started. Topic: %r  Duration: %.1f h",
+        "Research session started. Topic: %r  Duration: %.1f h  Model: %r",
         topic,
         duration_seconds / 3600,
+        resolved_model,
     )
 
     try:
@@ -267,17 +336,20 @@ def main() -> None:
     Path(args.reports_dir).mkdir(parents=True, exist_ok=True)
     Path(args.db_path).parent.mkdir(parents=True, exist_ok=True)
 
-    asyncio.run(
-        run(
-            topic=topic,
-            title=report_title,
-            duration_seconds=duration,
-            model=args.model,
-            ollama_base_url=args.ollama_url,
-            reports_dir=args.reports_dir,
-            db_path=args.db_path,
+    try:
+        asyncio.run(
+            run(
+                topic=topic,
+                title=report_title,
+                duration_seconds=duration,
+                model=args.model,
+                ollama_base_url=args.ollama_url,
+                reports_dir=args.reports_dir,
+                db_path=args.db_path,
+            )
         )
-    )
+    except KeyboardInterrupt:
+        logger.info("Interrupted by user.")
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import re
+import urllib.error
 import urllib.request
 from typing import Any, Optional
 
@@ -88,7 +89,7 @@ class CriticAgent:
 
     def __init__(
         self,
-        model: str = "llama3",
+        model: str = "qwen2.5:7b",
         ollama_base_url: str = "http://localhost:11434",
     ) -> None:
         self.model = model
@@ -99,7 +100,7 @@ class CriticAgent:
             {"model": self.model, "prompt": prompt, "stream": False}
         ).encode()
         req = urllib.request.Request(
-            f"{self.ollama_base_url}/api/generate",
+            f"{self.ollama_base_url.rstrip('/')}/api/generate",
             data=payload,
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -108,6 +109,20 @@ class CriticAgent:
             with urllib.request.urlopen(req, timeout=120) as resp:
                 data = json.loads(resp.read())
                 return data.get("response", "")
+        except urllib.error.HTTPError as exc:
+            error_text = ""
+            try:
+                payload = json.loads(exc.read().decode("utf-8", errors="ignore"))
+                if isinstance(payload, dict):
+                    error_text = str(payload.get("error", ""))
+            except Exception:
+                error_text = ""
+
+            if error_text:
+                logger.warning("Ollama critic call failed (%s): %s", exc.code, error_text)
+            else:
+                logger.warning("Ollama critic call failed (%s): %s", exc.code, exc.reason)
+            return None
         except Exception as exc:
             logger.warning("Ollama critic call failed: %s", exc)
             return None

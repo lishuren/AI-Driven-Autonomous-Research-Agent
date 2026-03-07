@@ -48,7 +48,7 @@ class AgentManager:
         self,
         topic: str,
         title: Optional[str] = None,
-        model: str = "llama3",
+        model: str = "qwen2.5:7b",
         ollama_base_url: str = "http://localhost:11434",
         reports_dir: str = "data/reports",
         db_path: str = "data/research.db",
@@ -106,7 +106,7 @@ class AgentManager:
         task = self._task_queue.popleft()
         reject_count = 0
 
-        while reject_count <= _MAX_REJECT_RETRIES:
+        while reject_count < _MAX_REJECT_RETRIES:
             # Research
             result = await self._researcher.research(task)
 
