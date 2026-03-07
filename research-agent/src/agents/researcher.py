@@ -4,7 +4,7 @@ researcher.py – Search & Scrape agent.
 For a given task query:
 1. Searches using SearchTool (DuckDuckGo).
 2. Scrapes the top N result URLs with ScraperTool.
-3. Passes the combined raw text to Ollama for a concise technical summary.
+3. Passes the combined raw text to Ollama for a concise summary.
 """
 
 from __future__ import annotations
@@ -21,28 +21,30 @@ from src.tools.search_tool import SearchTool
 
 logger = logging.getLogger(__name__)
 
-_SUMMARISE_PROMPT = """You are a senior software engineer writing technical research notes.
+_SUMMARISE_PROMPT = """You are a research assistant producing concise, factual notes.
 
 Task: {task}
 
-Below is raw scraped content from multiple web pages.  Your job is to distil this into
-a concise (≤500 words) TECHNICAL summary that:
-- Retains all mathematical formulas (LaTeX notation preferred).
-- Lists every required Python library.
-- Describes the algorithm in step-by-step pseudocode.
-- Includes any relevant code snippets verbatim.
-- DISCARDS marketing copy, opinions, and redundant prose.
+Below is raw scraped content from multiple web pages.  Write a concise summary
+(≤500 words) that directly answers the task.  Rules:
+- Report only facts that are actually present in the raw content below.
+- Do NOT invent, extrapolate, or hallucinate any details not in the source.
+- Match the style to the topic: for technical topics include formulas, algorithms,
+  and code only when genuinely present in the source; for general/entertainment
+  topics write plain prose describing what the sources say.
+- If the sources do not contain useful information for the task, explicitly say so.
+- DISCARD marketing copy, opinions, and redundant prose.
 
 Raw content:
 {raw_content}
 
-Technical summary:"""
+Summary:"""
 
 _SCRAPE_TOP_N = 4
 
 
 class ResearcherAgent:
-    """Searches the web, scrapes pages, and produces a technical summary."""
+    """Searches the web, scrapes pages, and produces a factual summary."""
 
     def __init__(
         self,

@@ -17,7 +17,7 @@ research-agent/src/
 ├── agent_manager.py     # Orchestrates Planner → Researcher → Critic pipeline
 ├── agents/
 │   ├── planner.py       # Decomposes topics; pre-search vocab grounding; feedback-aware; retrospective re-plan
-│   ├── researcher.py    # Search → Scrape → Summarise pipeline
+│   ├── researcher.py    # Search → Scrape → Summarise pipeline (topic-neutral factual summary)
 │   └── critic.py        # Quality auditor (PROCEED / REJECT) – flexible for all topic types
 ├── tools/
 │   ├── search_tool.py   # DuckDuckGo async wrapper with rate-limiting and retry logic
@@ -126,9 +126,10 @@ Arguments:
 - `--duration` — flexible format: `30s`, `10m`, `1h`, `1h30m`, `2hrs`, `90min`
 - `--model` — Requested Ollama model name (default `qwen2.5:7b`); falls back to an installed local model if unavailable
 - `--ollama-url` — Ollama base URL (default `http://localhost:11434`)
-- `--data-dir` — base data directory; if specified, overrides `--reports-dir` and `--db-path` defaults (e.g., `--data-dir /custom/path` uses `/custom/path/reports` and `/custom/path/research.db`)
+- `--data-dir` — base data directory; if specified, overrides `--reports-dir`, `--db-path`, and `--search-log` defaults
 - `--reports-dir` — output directory for Markdown reports (default `data/reports`); overridden by `--data-dir` if specified
 - `--db-path` — path to SQLite database (default `data/research.db`); overridden by `--data-dir` if specified
+- `--search-log` — optional path to a JSONL file logging every search query, result count, and result domains (disabled by default; auto-set to `<data-dir>/search.jsonl` when `--data-dir` is used)
 
 ---
 
@@ -157,7 +158,8 @@ Test files mirror the source layout:
 |---------|------|
 | `aiosqlite` | Async SQLite for knowledge base |
 | `chromadb` | Optional vector store for semantic dedup |
-| `duckduckgo-search` | Web search (no API key required) |
+| `ddgs` | Primary web search package (replaces `duckduckgo-search`) |
+| `duckduckgo-search` | Fallback web search package |
 | `playwright` | Headless Chromium scraping — handles JS/SPA pages |
 | `aiohttp` | Async HTTP utilities |
 | `pytest` + `pytest-asyncio` | Testing |
@@ -189,15 +191,29 @@ Python ≥ 3.10 required. Ollama must be running locally before starting the age
 ## Output Format
 
 Approved findings are consolidated by `AgentManager.generate_report()` into a
-Markdown file with sections:
+Markdown file. The report is **saved progressively after every approved finding**
+so partial results survive interrupts.
 
+Structure:
 ```markdown
 # <topic>
 
-## Implementation Logic
-## Math/Formulas
-## Dependencies
+## Findings
+
+### <subtopic 1>
+(full summary prose — style matches topic type)
+
+---
+
+### <subtopic 2>
+…
+
+## Math/Formulas        ← only present when formulas appear in summaries
+## Dependencies         ← only present when Python imports appear in summaries
+
 ## Sources
 ```
 
-Reports are saved incrementally to `data/reports/` during the run.
+Reports are saved to `data/reports/` (or `--reports-dir` / `--data-dir`).
+An optional JSONL search log (`--search-log`) records every query, result count,
+and result domains for post-run review.
