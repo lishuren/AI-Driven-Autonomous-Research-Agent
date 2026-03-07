@@ -18,8 +18,12 @@ logger = logging.getLogger(__name__)
 _RATE_LIMIT_MIN = 2.0
 _RATE_LIMIT_MAX = 5.0
 _DEFAULT_MAX_RESULTS = 5
-# Backends to try in order. "brave" uses Google and is blocked by robot detection; skip it.
+# Backends for the legacy `duckduckgo_search` package.
 _SEARCH_BACKENDS = ("lite", "html", "bing")
+# Backends for the newer `ddgs` package.  Omit brave/google (robot-blocked),
+# yahoo/grokipedia/wikipedia (slow / wrong result type), and duckduckgo
+# (unreliable); mojeek + yandex reliably return results.
+_SEARCH_BACKENDS_DDGS = ("mojeek", "yandex", "duckduckgo")
 _RETRY_MAX_ATTEMPTS = 3
 _RETRY_BACKOFF_BASE = 1.0  # seconds
 
@@ -91,10 +95,11 @@ def _search_sync(query: str, max_results: int) -> list[dict[str, Any]]:
                 )
                 with DDGS() as ddgs:
                     if using_new_ddgs:
-                        # Iterate through safe backends explicitly — avoid "brave" which
-                        # routes through Google and triggers robot-detection blocks.
+                        # Use the ddgs-specific backend list — its backend names differ
+                        # from duckduckgo_search, and passing an unknown name causes the
+                        # library to silently fall back to "auto" (all engines, very slow).
                         backend_error = None
-                        for backend in _SEARCH_BACKENDS:
+                        for backend in _SEARCH_BACKENDS_DDGS:
                             try:
                                 results = list(
                                     ddgs.text(query, max_results=max_results, backend=backend)
