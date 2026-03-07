@@ -18,45 +18,53 @@ logger = logging.getLogger(__name__)
 
 _DECOMPOSE_PROMPT = """You are an expert research decomposition specialist.
 
-Your task: Given the high-level topic below, decompose it into exactly 5 distinct,
-specific sub-topics or research questions. Each query should be directly relevant 
-to the topic as stated by the user - do NOT add extra context or reframe the topic 
-unless necessary for clarity.
+Your task: Decompose the user's topic into exactly 5 distinct, specific search queries.
+Each query must be DIRECT and to the point - do NOT embellish with phrases like 
+"quality source", "detailed analysis", "comprehensive overview", etc.
 
-Guidelines:
-- If the topic is technical, focus on implementation, formulas, and algorithms.
-- If the topic is general knowledge, focus on facts, history, or key concepts.
-- If the topic is about a TV series, focus on plot, characters, episodes, and events.
-- Stay faithful to the user's intent - don't add dimensions they didn't ask for.
+RULES (critical):
+1. Search queries should be SHORT and FOCUSED - just the core search terms.
+2. Do NOT add adjectives like "detailed", "comprehensive", "quality", "advanced".
+3. Do NOT add phrases like "in research", "from sources", "for analysis".
+4. Do NOT reframe or expand the user's topic unless they explicitly asked for it.
+5. Queries should work as-is in a search engine with minimal words.
 
-GOOD example for "Westworld S3 and S4": "Westworld season 3 plot summary main events"
-BAD example: "machine learning model Python implementation for predicting Westworld season ratings"
+GOOD queries (SHORT, FOCUSED):
+  - "Westworld season 3 plot"
+  - "RSI indicator formula Python"
+  - "neural network reinforcement learning"
 
-GOOD example for "RSI trading": "RSI indicator mathematical formula Python pandas"
-BAD example: "What is RSI?"
+BAD queries (EMBELLISHED, VERBOSE):
+  - "Detailed neural network architectures for quality analysis"
+  - "comprehensive Westworld research from authoritative sources"
+  - "in-depth study of RSI mathematical foundations"
 
 Topic: {topic}
 
-Already researched topics (avoid repeating): {known_topics}
+Already researched: {known_topics}
 
-Respond ONLY with a JSON array, no commentary:
+Respond ONLY with this JSON structure, no extra text:
 [
-  {{"subtopic": "<name>", "query": "<specific search query>"}},
-  ...
+  {{"subtopic": "<short name>", "query": "<short search query>"}},
+  {{"subtopic": "<short name>", "query": "<short search query>"}},
+  {{"subtopic": "<short name>", "query": "<short search query>"}},
+  {{"subtopic": "<short name>", "query": "<short search query>"}},
+  {{"subtopic": "<short name>", "query": "<short search query>"}}
 ]
 """
 
 _FOLLOWUP_PROMPT = """You are an expert research planner.
 
-The Critic Agent has REJECTED the following research and identified gaps:
+The Critic Agent REJECTED this research due to gaps:
 Topic: {topic}
-Gaps identified: {gaps}
+Gaps: {gaps}
 
-Generate ONE highly specific follow-up search query that would directly address
-these gaps and provide the missing technical details.
+Generate ONE short, focused follow-up search query that addresses ONLY the gaps.
+Do NOT add embellishments like "detailed", "quality", "comprehensive", "in research".
+Keep the query SHORT - just the core search terms needed.
 
-Respond ONLY with a JSON object:
-{{"subtopic": "{topic} (refined)", "query": "<specific follow-up search query>"}}
+Respond ONLY with this JSON:
+{{"subtopic": "{topic} (follow-up)", "query": "<short focused search query>"}}
 """
 
 
@@ -105,6 +113,29 @@ class PlannerAgent:
         self.model = model
         self.ollama_base_url = ollama_base_url
 
+    def _clean_query(self, query: str) -> str:
+        """Remove unnecessary embellishments from LLM-generated queries."""
+        # Words/phrases to remove (case-insensitive)
+        embellishments = {
+            "detailed", "detailed analysis", "comprehensive", "comprehensive overview",
+            "in-depth", "in-depth study", "quality", "quality source", "quality sources",
+            "authoritative source", "authoritative sources", "from research",
+            "in research", "for analysis", "for deeper understanding",
+            "advanced study", "scholarly", "academic research", "expert guide",
+            "step by step", "step-by-step",
+        }
+        
+        result = query.lower()
+        # Remove embellishments
+        for emb in embellishments:
+            result = result.replace(f" {emb} ", " ").replace(f"{emb} ", "").replace(f" {emb}", "")
+        
+        # Clean up multiple spaces
+        while "  " in result:
+            result = result.replace("  ", " ")
+        
+        return result.strip().capitalize() if result else query
+
     def _parse_json(self, text: Optional[str]) -> Any:
         """Extract the first JSON structure from *text*."""
         if not text:
@@ -146,6 +177,10 @@ class PlannerAgent:
 
         tasks = self._parse_json(raw)
         if isinstance(tasks, list) and tasks:
+            # Clean all queries to remove embellishments
+            for task in tasks:
+                if isinstance(task, dict) and "query" in task:
+                    task["query"] = self._clean_query(task["query"])
             logger.info("Planner generated %d tasks for topic %r.", len(tasks), topic)
             return tasks
 
@@ -165,11 +200,13 @@ class PlannerAgent:
 
         task = self._parse_json(raw)
         if isinstance(task, dict) and "query" in task:
+            # Clean query to remove embellishments
+            task["query"] = self._clean_query(task["query"])
             logger.info("Planner refined task for %r: %s", topic, task["query"])
             return task
 
-        # Fallback: build a query from the gaps description
+        # Fallback: build a simple query from topic and gaps
         return {
             "subtopic": f"{topic} (refined)",
-            "query": f"{topic} {gaps} python implementation formula",
+            "query": self._clean_query(f"{topic} {gaps}"),
         }

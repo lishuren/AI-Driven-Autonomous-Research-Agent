@@ -16,12 +16,12 @@ research-agent/src/
 ├── main.py              # CLI entry point; asyncio loop controller
 ├── agent_manager.py     # Orchestrates Planner → Researcher → Critic pipeline
 ├── agents/
-│   ├── planner.py       # Decomposes topics into search tasks via Ollama
+│   ├── planner.py       # Decomposes topics into search tasks; cleans queries to prevent embellishment
 │   ├── researcher.py    # Search → Scrape → Summarise pipeline
 │   └── critic.py        # Quality auditor (PROCEED / REJECT) – flexible for all topic types
 ├── tools/
-│   ├── search_tool.py   # DuckDuckGo async wrapper with rate-limiting
-│   └── scraper_tool.py  # Playwright headless Chromium scraper (20 000 char cap)
+│   ├── search_tool.py   # DuckDuckGo async wrapper with rate-limiting and retry logic
+│   └── scraper_tool.py  # Playwright headless Chromium scraper with retry on transient errors
 └── database/
     └── knowledge_base.py  # SQLite (aiosqlite) + optional ChromaDB vector store
 ```
@@ -85,10 +85,12 @@ All public agent methods are `async def`.
 
 DB and report paths default to `data/research.db` and `data/reports/`.
 
-### Rate-limiting
-`SearchTool` enforces a random 2–5 s delay between consecutive DuckDuckGo
-requests. `main.py` additionally sleeps 2–5 s between research cycles and
-queues are refreshed every 10 approved findings (`_QUEUE_REFRESH_EVERY`).
+### Rate-limiting and Retry Logic
+`SearchTool` and `ScraperTool` implement smart retry behavior:
+- **Transient errors** (timeout, DNS, connection refused, 429/503) retry up to 3 attempts with exponential backoff (1s, 2s, 4s + jitter)
+- **Permanent errors** (404, 403, invalid URL) fail immediately without retry
+- Both tools maintain rate-limiting: `SearchTool` enforces 2–5 s random delay between DuckDuckGo requests
+- `main.py` additionally sleeps 2–5 s between research cycles and refreshes queue every 10 approved findings (`_QUEUE_REFRESH_EVERY`)
 
 ---
 
@@ -157,6 +159,7 @@ Python ≥ 3.10 required. Ollama must be running locally before starting the age
 - Avoid adding external HTTP clients or LLM SDKs unless strictly necessary — prefer thin `urllib.request` calls to Ollama.
 - Do not change the Planner → Researcher → Critic pipeline ordering or remove the critic quality gate.
 - The Planner should generate queries faithful to the user's topic intent without adding unwanted technical framing.
+- The Planner includes `_clean_query()` to remove embellishments like "detailed", "quality", "comprehensive" from generated queries.
 - The Critic should evaluate content quality based on topic type, not force all topics into a single assessment model.
 - When adding new agents, follow the same pattern: `__init__(model, ollama_base_url)`, async public method, `_call_ollama` private helper, graceful fallback when Ollama is unreachable.
 
