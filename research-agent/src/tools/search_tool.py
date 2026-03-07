@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 _RATE_LIMIT_MIN = 2.0
 _RATE_LIMIT_MAX = 5.0
 _DEFAULT_MAX_RESULTS = 5
+# Backends to try in order. "brave" uses Google and is blocked by robot detection; skip it.
 _SEARCH_BACKENDS = ("lite", "html", "bing")
 _RETRY_MAX_ATTEMPTS = 3
 _RETRY_BACKOFF_BASE = 1.0  # seconds
@@ -90,11 +91,31 @@ def _search_sync(query: str, max_results: int) -> list[dict[str, Any]]:
                 )
                 with DDGS() as ddgs:
                     if using_new_ddgs:
-                        # `ddgs` exposes a different backend set and `auto` is usually the
-                        # most reliable cross-network option.
-                        return _normalise_results(
-                            list(ddgs.text(query, max_results=max_results))
-                        )
+                        # Iterate through safe backends explicitly — avoid "brave" which
+                        # routes through Google and triggers robot-detection blocks.
+                        backend_error = None
+                        for backend in _SEARCH_BACKENDS:
+                            try:
+                                results = list(
+                                    ddgs.text(query, max_results=max_results, backend=backend)
+                                )
+                            except TypeError:
+                                results = list(ddgs.text(query, max_results=max_results))
+                            except Exception as exc:
+                                backend_error = exc
+                                logger.info(
+                                    "Search backend %r failed for query %r: %s",
+                                    backend, query, exc,
+                                )
+                                continue
+
+                            normalised = _normalise_results(results)
+                            if normalised:
+                                return normalised
+
+                        if backend_error is not None:
+                            raise backend_error
+                        return []
 
                     backend_error: Optional[Exception] = None
                     for backend in _SEARCH_BACKENDS:
