@@ -205,3 +205,110 @@ class TestAgentManager:
         assert "my_spec" in content
         # The long spec text should NOT appear as the report heading
         assert "## Research" not in content.split("\n")[0]
+
+    # ------------------------------------------------------------------
+    # Phase 2: feedback tracking
+    # ------------------------------------------------------------------
+
+    def test_run_cycle_tracks_successful_query(self, event_loop, tmp_reports, tmp_db):
+        """Approved results append the query to _successful_queries."""
+        from src.agent_manager import AgentManager
+        from src.database.knowledge_base import KnowledgeBase
+
+        with patch("src.agent_manager.PlannerAgent"), \
+             patch("src.agent_manager.ResearcherAgent"), \
+             patch("src.agent_manager.CriticAgent"):
+            manager = AgentManager(topic="RSI", reports_dir=tmp_reports, db_path=tmp_db)
+
+        manager._kb = KnowledgeBase(db_path=tmp_db)
+        event_loop.run_until_complete(manager._kb.init())
+
+        manager._task_queue.append({"subtopic": "RSI", "query": "RSI formula python"})
+        manager._researcher.research = AsyncMock(return_value={
+            "subtopic": "RSI", "query": "RSI formula python",
+            "summary": "RSI details", "source_urls": [], "raw_content": "",
+        })
+        manager._critic.review = AsyncMock(return_value={
+            "status": "PROCEED", "checks": {}, "missing": "",
+        })
+        manager._planner.decompose = AsyncMock(return_value=[])
+
+        event_loop.run_until_complete(manager.run_cycle())
+
+        assert "RSI formula python" in manager._successful_queries
+        assert manager._consecutive_failures == 0
+        event_loop.run_until_complete(manager._kb.close())
+
+    def test_run_cycle_tracks_failed_query(self, event_loop, tmp_reports, tmp_db):
+        """Exhausted-retry tasks append the last query to _failed_queries."""
+        from src.agent_manager import AgentManager
+        from src.database.knowledge_base import KnowledgeBase
+
+        with patch("src.agent_manager.PlannerAgent"), \
+             patch("src.agent_manager.ResearcherAgent"), \
+             patch("src.agent_manager.CriticAgent"):
+            manager = AgentManager(topic="MACD", reports_dir=tmp_reports, db_path=tmp_db)
+
+        manager._kb = KnowledgeBase(db_path=tmp_db)
+        event_loop.run_until_complete(manager._kb.init())
+
+        manager._task_queue.append({"subtopic": "MACD", "query": "MACD formula"})
+        manager._researcher.research = AsyncMock(return_value={
+            "subtopic": "MACD", "query": "MACD formula",
+            "summary": "weak", "source_urls": [], "raw_content": "",
+        })
+        manager._critic.review = AsyncMock(return_value={
+            "status": "REJECT", "checks": {}, "missing": "missing",
+        })
+        manager._planner.refine = AsyncMock(return_value={
+            "subtopic": "MACD (refined)", "query": "MACD refined query",
+        })
+        manager._planner.decompose = AsyncMock(return_value=[])
+        manager._planner.decompose_retrospective = AsyncMock(return_value=[])
+
+        event_loop.run_until_complete(manager.run_cycle())
+
+        assert len(manager._failed_queries) == 1
+        assert manager._consecutive_failures == 1
+        event_loop.run_until_complete(manager._kb.close())
+
+    # ------------------------------------------------------------------
+    # Phase 3: stuck detection
+    # ------------------------------------------------------------------
+
+    def test_run_cycle_triggers_retrospective_when_stuck(self, event_loop, tmp_reports, tmp_db):
+        """After _MAX_CONSECUTIVE_FAILURES, a retrospective re-plan is triggered."""
+        from src.agent_manager import AgentManager, _MAX_CONSECUTIVE_FAILURES
+        from src.database.knowledge_base import KnowledgeBase
+
+        with patch("src.agent_manager.PlannerAgent"), \
+             patch("src.agent_manager.ResearcherAgent"), \
+             patch("src.agent_manager.CriticAgent"):
+            manager = AgentManager(topic="Bollinger", reports_dir=tmp_reports, db_path=tmp_db)
+
+        manager._kb = KnowledgeBase(db_path=tmp_db)
+        event_loop.run_until_complete(manager._kb.init())
+
+        # Pre-load failure counter so one more failure tips it over the threshold
+        manager._consecutive_failures = _MAX_CONSECUTIVE_FAILURES - 1
+
+        manager._task_queue.append({"subtopic": "B", "query": "bollinger bands"})
+        manager._researcher.research = AsyncMock(return_value={
+            "subtopic": "B", "query": "bollinger bands",
+            "summary": "weak", "source_urls": [], "raw_content": "",
+        })
+        manager._critic.review = AsyncMock(return_value={
+            "status": "REJECT", "checks": {}, "missing": "x",
+        })
+        manager._planner.refine = AsyncMock(return_value={
+            "subtopic": "B refined", "query": "bollinger bands refined",
+        })
+        new_tasks = [{"subtopic": "B new", "query": "bollinger new angle"}]
+        manager._planner.decompose_retrospective = AsyncMock(return_value=new_tasks)
+
+        event_loop.run_until_complete(manager.run_cycle())
+
+        # Counter should have been reset and retrospective called
+        assert manager._consecutive_failures == 0
+        manager._planner.decompose_retrospective.assert_called_once()
+        event_loop.run_until_complete(manager._kb.close())
