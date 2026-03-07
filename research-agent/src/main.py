@@ -212,10 +212,72 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _parse_requirements_file(path: Path) -> tuple[str, str, Optional[str]]:
+    """Parse a requirements file and extract topic, title, and optional user prompt.
+
+    Supports section markers:
+    - ``## Prompt`` — Text between this heading and the next ``##`` heading is
+      extracted as the user prompt (injected into all LLM calls).
+    - ``## Topic`` — Text after this heading becomes the research topic.
+    - If no section markers are found, the entire file content is used as the
+      topic (backward compatible).
+
+    Returns ``(topic, title, user_prompt)``.
+    """
+    raw = path.read_text(encoding="utf-8").strip()
+    title = path.stem
+
+    # Try to extract sections based on ## headings
+    import re as _re
+    sections: dict[str, str] = {}
+    current_section: Optional[str] = None
+    current_lines: list[str] = []
+    non_section_lines: list[str] = []
+
+    for line in raw.split("\n"):
+        heading_match = _re.match(r"^##\s+(.+)$", line)
+        if heading_match:
+            # Save previous section
+            if current_section is not None:
+                sections[current_section] = "\n".join(current_lines).strip()
+            current_section = heading_match.group(1).strip().lower()
+            current_lines = []
+        elif current_section is not None:
+            current_lines.append(line)
+        else:
+            non_section_lines.append(line)
+
+    # Save last section
+    if current_section is not None:
+        sections[current_section] = "\n".join(current_lines).strip()
+
+    user_prompt: Optional[str] = sections.get("prompt") or None
+
+    if "topic" in sections:
+        topic = sections["topic"]
+    elif sections:
+        # Has section markers but no ## Topic — use non-section text + all
+        # non-prompt sections as topic
+        parts = ["\n".join(non_section_lines).strip()]
+        for key, val in sections.items():
+            if key != "prompt" and val:
+                parts.append(val)
+        topic = "\n\n".join(p for p in parts if p)
+    else:
+        # No section markers at all — backward compat: entire file is topic
+        topic = raw
+
+    if not topic:
+        topic = raw
+
+    return topic, title, user_prompt
+
+
 async def run(
     topic: str,
     duration_seconds: float,
     title: Optional[str] = None,
+    user_prompt: Optional[str] = None,
     model: str = "qwen2.5:7b",
     ollama_base_url: str = "http://localhost:11434",
     reports_dir: str = "data/reports",
@@ -258,6 +320,7 @@ async def run(
     manager = AgentManager(
         topic=topic,
         title=title,
+        user_prompt=user_prompt,
         model=resolved_model,
         ollama_base_url=ollama_base_url,
         reports_dir=reports_dir,
@@ -273,49 +336,60 @@ async def run(
     )
 
     try:
-        # Seed the initial task queue
-        await manager.populate_queue()
+        # Write an initial placeholder report so the file exists immediately.
+        manager.generate_report()
+
+        # Build the hierarchical topic graph (recursive decomposition)
+        logger.info("Building topic graph ...")
+        try:
+            await manager.build_graph()
+        except Exception as exc:
+            logger.error("Graph build failed: %s — falling back to flat mode.", exc)
+            await manager.populate_queue()
+
+        manager.generate_report()  # Update report with graph outline
 
         while time.monotonic() < end_time:
-            # Refresh the queue if it runs dry
-            if not manager.has_tasks():
-                logger.info("Task queue empty – requesting new tasks from Planner.")
+            # Prefer graph-based orchestration; fall back to flat queue
+            if manager.has_graph_work():
                 try:
-                    await manager.populate_queue()
+                    finding = await manager.run_graph()
                 except Exception as exc:
-                    logger.error("Planner populate failed: %s", exc)
+                    logger.error(
+                        "Graph cycle error (will retry in %ds): %s",
+                        _ERROR_SLEEP_SECONDS, exc, exc_info=True,
+                    )
                     await asyncio.sleep(_ERROR_SLEEP_SECONDS)
                     continue
-
-            # Run one research cycle
-            try:
-                finding = await manager.run_cycle()
-                if finding:
-                    approved_count += 1
-                    logger.info(
-                        "Approved finding #%d: %r  (%.0f min remaining)",
-                        approved_count,
-                        finding["subtopic"],
-                        (end_time - time.monotonic()) / 60,
+            elif manager.has_tasks():
+                try:
+                    finding = await manager.run_cycle()
+                except Exception as exc:
+                    logger.error(
+                        "Cycle error (will retry in %ds): %s",
+                        _ERROR_SLEEP_SECONDS, exc, exc_info=True,
                     )
+                    await asyncio.sleep(_ERROR_SLEEP_SECONDS)
+                    continue
+            else:
+                # Both graph and queue exhausted — we're done
+                logger.info("All research work complete.")
+                break
 
-                    # Progressive report save — partial results survive any crash/interrupt
-                    try:
-                        manager.generate_report()
-                    except Exception as report_exc:
-                        logger.warning("Progressive report save failed: %s", report_exc)
-
-                    # Periodically refresh the queue
-                    if approved_count % _QUEUE_REFRESH_EVERY == 0:
-                        await manager.populate_queue()
-
-            except Exception as exc:
-                logger.error(
-                    "Cycle error (will retry in %ds): %s", _ERROR_SLEEP_SECONDS, exc,
-                    exc_info=True,
+            if finding:
+                approved_count += 1
+                logger.info(
+                    "Approved finding #%d: %r  (%.0f min remaining)",
+                    approved_count,
+                    finding["subtopic"],
+                    (end_time - time.monotonic()) / 60,
                 )
-                await asyncio.sleep(_ERROR_SLEEP_SECONDS)
-                continue
+
+                # Progressive report save
+                try:
+                    manager.generate_report()
+                except Exception as report_exc:
+                    logger.warning("Progressive report save failed: %s", report_exc)
 
             cycles_completed += 1
 
@@ -350,13 +424,13 @@ def main() -> None:
     else:
         duration = _DEFAULT_HOURS * 3600
 
-    # Resolve topic and title from --topic or --requirements-file
+    # Resolve topic, title, and optional user prompt
+    user_prompt: Optional[str] = None
     if args.requirements_file is not None:
         req_path = Path(args.requirements_file)
         if not req_path.is_file():
             sys.exit(f"Requirements file not found: {args.requirements_file!r}")
-        topic = req_path.read_text(encoding="utf-8").strip()
-        report_title: Optional[str] = req_path.stem
+        topic, report_title, user_prompt = _parse_requirements_file(req_path)
     else:
         topic = args.topic
         report_title = None
@@ -386,6 +460,7 @@ def main() -> None:
             run(
                 topic=topic,
                 title=report_title,
+                user_prompt=user_prompt,
                 duration_seconds=duration,
                 model=args.model,
                 ollama_base_url=args.ollama_url,

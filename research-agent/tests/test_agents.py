@@ -269,6 +269,7 @@ class TestResearcherAgent:
             instance.model = "llama3"
             instance.ollama_base_url = "http://localhost:11434"
             instance.max_search_results = 4
+            instance._user_prompt = None
 
             mock_search = MagicMock()
             mock_search.search = AsyncMock(return_value=[
@@ -296,6 +297,7 @@ class TestResearcherAgent:
         instance.model = "llama3"
         instance.ollama_base_url = "http://localhost:11434"
         instance.max_search_results = 4
+        instance._user_prompt = None
 
         mock_search = MagicMock()
         mock_search.search = AsyncMock(return_value=[])

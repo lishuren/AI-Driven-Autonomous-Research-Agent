@@ -160,14 +160,16 @@ class TestRequirementsFile:
     def test_main_reads_requirements_file(self, tmp_path, monkeypatch):
         """main() should read the file and pass its content as the topic."""
         req_file = tmp_path / "spec.md"
-        spec_content = "## Research\nAnalyse RSI.\n\n## Output\nPython code."
+        # No section markers — backward compatible: entire file is topic
+        spec_content = "Analyse RSI momentum indicators for trading."
         req_file.write_text(spec_content, encoding="utf-8")
 
         captured: dict = {}
 
-        async def fake_run(topic, duration_seconds, title=None, **kwargs):
+        async def fake_run(topic, duration_seconds, title=None, user_prompt=None, **kwargs):
             captured["topic"] = topic
             captured["title"] = title
+            captured["user_prompt"] = user_prompt
 
         monkeypatch.setattr("src.main.run", fake_run)
         monkeypatch.setattr("src.main.Path.mkdir", lambda *a, **kw: None)
@@ -181,6 +183,7 @@ class TestRequirementsFile:
 
         assert captured["topic"] == spec_content
         assert captured["title"] == "spec"
+        assert captured["user_prompt"] is None
 
     def test_main_missing_requirements_file_exits(self, tmp_path, monkeypatch):
         """main() should exit with an error if the file does not exist."""
@@ -242,12 +245,14 @@ class TestProgressiveReportSave:
         mock_manager = MagicMock()
         mock_manager.init = AsyncMock()
         mock_manager.close = AsyncMock()
-        mock_manager.has_tasks = MagicMock(return_value=True)
+        mock_manager.build_graph = AsyncMock()
+        mock_manager.has_graph_work = MagicMock(side_effect=[True, True, False])
+        mock_manager.has_tasks = MagicMock(return_value=False)
         mock_manager.populate_queue = AsyncMock()
 
         finding = {"subtopic": "RL policy", "query": "policy gradient", "source_urls": []}
-        # First call returns a finding; subsequent calls return None to idle out.
-        mock_manager.run_cycle = AsyncMock(side_effect=[finding, None, None, None, None])
+        # First call returns a finding; second returns None.
+        mock_manager.run_graph = AsyncMock(side_effect=[finding, None])
         mock_manager.generate_report = MagicMock(
             return_value=tmp_path / "reports" / "test.md"
         )
@@ -263,8 +268,8 @@ class TestProgressiveReportSave:
                 )
             )
 
-        # generate_report() called: once for the finding + once in the finally block
-        assert mock_manager.generate_report.call_count >= 2
+        # generate_report() called: initial + after graph outline + after finding + finally
+        assert mock_manager.generate_report.call_count >= 3
 
     def test_report_saved_on_interrupt(self, event_loop, tmp_path):
         """generate_report() is called in the finally block even on KeyboardInterrupt."""
@@ -277,9 +282,10 @@ class TestProgressiveReportSave:
         mock_manager = MagicMock()
         mock_manager.init = AsyncMock()
         mock_manager.close = AsyncMock()
-        mock_manager.has_tasks = MagicMock(return_value=True)
+        mock_manager.build_graph = AsyncMock(side_effect=KeyboardInterrupt)
+        mock_manager.has_graph_work = MagicMock(return_value=False)
+        mock_manager.has_tasks = MagicMock(return_value=False)
         mock_manager.populate_queue = AsyncMock()
-        mock_manager.run_cycle = AsyncMock(side_effect=KeyboardInterrupt)
         mock_manager.generate_report = MagicMock(
             return_value=tmp_path / "reports" / "test.md"
         )
@@ -296,4 +302,5 @@ class TestProgressiveReportSave:
                     )
                 )
 
-        mock_manager.generate_report.assert_called_once()
+        # generate_report called at start (placeholder) and in finally block
+        assert mock_manager.generate_report.call_count >= 2

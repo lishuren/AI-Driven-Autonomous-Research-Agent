@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 _SUMMARISE_PROMPT = """You are a research assistant producing concise, factual notes.
 
 Task: {task}
-
+{user_context}
 Below is raw scraped content from multiple web pages.  Write a concise summary
 (≤500 words) that directly answers the task.  Rules:
 - Report only facts that are actually present in the raw content below.
@@ -51,10 +51,12 @@ class ResearcherAgent:
         model: str = "qwen2.5:7b",
         ollama_base_url: str = "http://localhost:11434",
         max_search_results: int = _SCRAPE_TOP_N,
+        user_prompt: Optional[str] = None,
     ) -> None:
         self.model = model
         self.ollama_base_url = ollama_base_url
         self.max_search_results = max_search_results
+        self._user_prompt = user_prompt
 
         self._search = SearchTool(max_results=max_search_results)
         self._scraper = ScraperTool()
@@ -132,7 +134,14 @@ class ResearcherAgent:
         )
 
         # 3. Summarise with Ollama
-        prompt = _SUMMARISE_PROMPT.format(task=subtopic, raw_content=raw_content[:12000])
+        user_context = (
+            f"User instructions:\n{self._user_prompt}\n"
+            if self._user_prompt else ""
+        )
+        prompt = _SUMMARISE_PROMPT.format(
+            task=subtopic, raw_content=raw_content[:12000],
+            user_context=user_context,
+        )
         loop = asyncio.get_event_loop()
         summary = await loop.run_in_executor(None, self._call_ollama, prompt)
 

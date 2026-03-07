@@ -22,7 +22,7 @@ def tmp_db(tmp_path):
 
 
 class TestAgentManager:
-    def _build_manager(self, topic, reports_dir, db_path):
+    def _build_manager(self, topic, reports_dir, db_path, **kwargs):
         from src.agent_manager import AgentManager
 
         with patch("src.agent_manager.PlannerAgent"), \
@@ -33,6 +33,7 @@ class TestAgentManager:
                 topic=topic,
                 reports_dir=reports_dir,
                 db_path=db_path,
+                **kwargs,
             )
         return manager
 
@@ -154,17 +155,7 @@ class TestAgentManager:
         event_loop.run_until_complete(manager._kb.close())
 
     def test_generate_report(self, tmp_reports, tmp_db):
-        from src.agent_manager import AgentManager
-
-        with patch("src.agent_manager.PlannerAgent"), \
-             patch("src.agent_manager.ResearcherAgent"), \
-             patch("src.agent_manager.CriticAgent"), \
-             patch("src.agent_manager.KnowledgeBase"):
-            manager = AgentManager(
-                topic="RSI Strategy",
-                reports_dir=tmp_reports,
-                db_path=tmp_db,
-            )
+        manager = self._build_manager("RSI Strategy", tmp_reports, tmp_db)
 
         manager._approved = [
             {
@@ -190,18 +181,10 @@ class TestAgentManager:
 
     def test_generate_report_uses_title_for_filename(self, tmp_reports, tmp_db):
         """When a title is provided it is used for the report file name and heading."""
-        from src.agent_manager import AgentManager
-
-        with patch("src.agent_manager.PlannerAgent"), \
-             patch("src.agent_manager.ResearcherAgent"), \
-             patch("src.agent_manager.CriticAgent"), \
-             patch("src.agent_manager.KnowledgeBase"):
-            manager = AgentManager(
-                topic="## Research\nFull spec…\n\n## Output\nPython code.",
-                title="my_spec",
-                reports_dir=tmp_reports,
-                db_path=tmp_db,
-            )
+        manager = self._build_manager(
+            "## Research\nFull spec…\n\n## Output\nPython code.",
+            tmp_reports, tmp_db, title="my_spec",
+        )
 
         manager._approved = []
         report_path = manager.generate_report()

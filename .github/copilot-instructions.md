@@ -14,9 +14,10 @@ locally against an Ollama LLM and uses DuckDuckGo for live web searches.
 ```
 research-agent/src/
 ├── main.py              # CLI entry point; asyncio loop controller
-├── agent_manager.py     # Orchestrates Planner → Researcher → Critic pipeline
+├── agent_manager.py     # Orchestrates Planner → Researcher → Critic pipeline (graph + flat modes)
+├── topic_graph.py       # TopicNode/TopicGraph DAG for hierarchical recursive research
 ├── agents/
-│   ├── planner.py       # Decomposes topics; pre-search vocab grounding; feedback-aware; retrospective re-plan
+│   ├── planner.py       # Decomposes topics; analyze/hierarchical decompose; consolidate; restructure
 │   ├── researcher.py    # Search → Scrape → Summarise pipeline (topic-neutral factual summary)
 │   └── critic.py        # Quality auditor (PROCEED / REJECT) – flexible for all topic types
 ├── tools/
@@ -26,7 +27,36 @@ research-agent/src/
     └── knowledge_base.py  # SQLite (aiosqlite) + optional ChromaDB vector store
 ```
 
-### Data flow
+### Data flow (Graph Mode — default)
+
+```
+CLI (main.py)
+  └─▶ AgentManager.build_graph()
+        ├─▶ ResearcherAgent.research() on root topic (initial context)
+        └─▶ AgentManager._decompose_node() (recursive)
+              ├─▶ PlannerAgent.analyze()           (leaf vs complex?)
+              │     ├─▶ Leaf → mark pending for research
+              │     └─▶ Complex → PlannerAgent.decompose_hierarchical()
+              │           └─▶ TopicGraph.add_node() for each sub-topic (cross-ref dedup)
+              │                 └─▶ _decompose_node() recursively (up to MAX_DEPTH=5)
+              └─▶ TopicGraph tracks all nodes, statuses, and priorities
+  └─▶ AgentManager.run_graph() loop (while has_graph_work)
+        ├─▶ Priority 1: Research pending leaf nodes
+        │     └─▶ _research_node()
+        │           ├─▶ ResearcherAgent.research()
+        │           ├─▶ KnowledgeBase.is_duplicate()
+        │           ├─▶ CriticAgent.review()
+        │           │     ├─▶ PROCEED → KnowledgeBase.save() → mark_researched
+        │           │     └─▶ REJECT  → PlannerAgent.refine() → retry (≤3)
+        │           └─▶ On exhaustion → mark_failed, stuck detection
+        ├─▶ Priority 2: Consolidate parent nodes (bottom-up)
+        │     └─▶ _consolidate_node()
+        │           ├─▶ PlannerAgent.consolidate_summaries()
+        │           └─▶ CriticAgent.review() → mark_consolidated
+        └─▶ AgentManager.generate_report() → Markdown file (progressive)
+```
+
+### Data flow (Flat Mode — fallback)
 
 ```
 CLI (main.py)
@@ -51,6 +81,30 @@ CLI (main.py)
 ---
 
 ## Key Design Patterns
+
+### Hierarchical Topic Graph (Graph Mode)
+The default orchestration mode builds a recursive **TopicGraph** (DAG):
+- `TopicNode` dataclass tracks: name, query, depth, parent/child IDs, status
+  (pending → analyzing → researching → completed → consolidated → failed),
+  priority, summary, consolidated_summary, source_urls.
+- `TopicGraph` manages node lifecycle, cross-reference dedup (case-insensitive
+  name matching), and traversal helpers.
+- Maximum recursion depth: `MAX_DEPTH = 5`.
+- `AgentManager.build_graph()` does initial root research for context, then
+  recursively calls `PlannerAgent.analyze()` (leaf vs complex) and
+  `PlannerAgent.decompose_hierarchical()`.
+- `AgentManager.run_graph()` processes one node per call: researches pending
+  leaves first, then consolidates parent nodes bottom-up.
+- `PlannerAgent.consolidate_summaries()` synthesizes child summaries; the
+  Critic reviews consolidated content before marking nodes complete.
+- Stuck detection triggers `PlannerAgent.suggest_restructure()` which adds new
+  leaf nodes to the graph.
+
+### Requirements File Format
+The `--requirements-file` option supports section markers:
+- `## Prompt` — Text extracted as a user prompt injected into all LLM calls.
+- `## Topic` — Text used as the research topic.
+- If no section markers are found, the entire file is used as the topic (backward compatible).
 
 ### Critic Loop (quality gate)
 Every research result must pass three checks before being accepted:
@@ -146,8 +200,10 @@ pytest tests/test_agents.py -v
 Test files mirror the source layout:
 - `test_agents.py` — unit tests for Planner, Researcher, Critic
 - `test_agent_manager.py` — AgentManager orchestration tests
+- `test_topic_graph.py` — TopicGraph / TopicNode tests
 - `test_knowledge_base.py` — KnowledgeBase CRUD and dedup tests
 - `test_tools.py` — SearchTool / ScraperTool tests
+- `test_main.py` — CLI argument parsing and main loop tests
 - `test_main.py` — CLI argument parsing and main loop tests
 
 ---
