@@ -24,6 +24,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import random
 import re
 import sys
@@ -31,6 +32,36 @@ import time
 import urllib.request
 from pathlib import Path
 from typing import Optional
+
+
+def _load_dotenv(env_path: Optional[Path] = None) -> None:
+    """Load KEY=VALUE pairs from a .env file into os.environ (stdlib only).
+
+    Lines starting with ``#`` and blank lines are ignored.  Existing
+    environment variables are *not* overwritten, so shell exports take
+    precedence.  The file is looked for next to this module's package root
+    (``research-agent/.env``) unless *env_path* is supplied explicitly.
+    """
+    if env_path is None:
+        # src/main.py lives at <root>/src/main.py; .env is at <root>/.env
+        env_path = Path(__file__).resolve().parent.parent / ".env"
+    if not env_path.is_file():
+        return
+    with env_path.open(encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+
+_load_dotenv()
 
 from src.agent_manager import AgentManager
 from src.tools.search_tool import SearchLogger
@@ -264,8 +295,19 @@ def _parse_requirements_file(path: Path) -> tuple[str, str, Optional[str]]:
                 parts.append(val)
         topic = "\n\n".join(p for p in parts if p)
     else:
-        # No section markers at all — backward compat: entire file is topic
-        topic = raw
+        # No section markers at all.
+        # If the file starts with a Markdown heading (# …), treat the heading
+        # text as the concise searchable topic and the full file content as
+        # background context (user_prompt) so all LLM calls are grounded in the
+        # document without using the file-name as a search query.
+        first_line = raw.split("\n")[0].strip()
+        heading_match = _re.match(r"^#{1,3}\s+(.+)$", first_line)
+        if heading_match:
+            topic = heading_match.group(1).strip()
+            user_prompt = raw  # full document is background context
+        else:
+            # Backward compat: entire file is topic
+            topic = raw
 
     if not topic:
         topic = raw
@@ -349,7 +391,10 @@ async def run(
 
         manager.generate_report()  # Update report with graph outline
 
-        while time.monotonic() < end_time:
+        deadline_logged = False
+        while True:
+            past_deadline = time.monotonic() >= end_time
+
             # Prefer graph-based orchestration; fall back to flat queue
             if manager.has_graph_work():
                 try:
@@ -372,18 +417,26 @@ async def run(
                     await asyncio.sleep(_ERROR_SLEEP_SECONDS)
                     continue
             else:
-                # Both graph and queue exhausted — we're done
+                # Both graph and queue exhausted — we're done regardless of time
                 logger.info("All research work complete.")
                 break
 
             if finding:
                 approved_count += 1
-                logger.info(
-                    "Approved finding #%d: %r  (%.0f min remaining)",
-                    approved_count,
-                    finding["subtopic"],
-                    (end_time - time.monotonic()) / 60,
-                )
+                remaining = end_time - time.monotonic()
+                if remaining > 0:
+                    logger.info(
+                        "Approved finding #%d: %r  (%.0f min remaining)",
+                        approved_count,
+                        finding["subtopic"],
+                        remaining / 60,
+                    )
+                else:
+                    logger.info(
+                        "Approved finding #%d: %r  (deadline passed — press Ctrl+C to stop)",
+                        approved_count,
+                        finding["subtopic"],
+                    )
 
                 # Progressive report save
                 try:
@@ -391,14 +444,19 @@ async def run(
                 except Exception as report_exc:
                     logger.warning("Progressive report save failed: %s", report_exc)
 
+            # Log once when we pass the deadline but keep going
+            if past_deadline and not deadline_logged:
+                logger.info(
+                    "Specified duration reached but research is still in progress. "
+                    "Continuing until complete — press Ctrl+C to stop now."
+                )
+                deadline_logged = True
+
             cycles_completed += 1
 
-            # Rate limiting – randomised sleep between cycles
+            # Rate limiting — always sleep the full interval (no clamp to deadline)
             sleep_time = random.uniform(_CYCLE_SLEEP_MIN, _CYCLE_SLEEP_MAX)
-            remaining = end_time - time.monotonic()
-            if remaining <= 0:
-                break
-            await asyncio.sleep(min(sleep_time, remaining))
+            await asyncio.sleep(sleep_time)
 
     finally:
         # Always generate the final report

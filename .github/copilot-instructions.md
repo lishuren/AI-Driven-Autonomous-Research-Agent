@@ -104,7 +104,10 @@ The default orchestration mode builds a recursive **TopicGraph** (DAG):
 The `--requirements-file` option supports section markers:
 - `## Prompt` — Text extracted as a user prompt injected into all LLM calls.
 - `## Topic` — Text used as the research topic.
-- If no section markers are found, the entire file is used as the topic (backward compatible).
+- If no section markers are found and the file starts with a Markdown heading (`#`, `##`, or `###`), the heading text becomes the concise searchable **topic** and the full file content becomes the **user_prompt** (background context for the LLM). This avoids using the filename as a search query when the file is a rich analysis document.
+- If no section markers and no leading heading, the entire file is used as the topic (backward compatible).
+
+`build_graph()` derives `root_name` (used as the DuckDuckGo query) from the topic's first line with Markdown heading markers stripped — never from the filename title.
 
 ### Critic Loop (quality gate)
 Every research result must pass three checks before being accepted:
@@ -150,6 +153,18 @@ DB and report paths default to `data/research.db` and `data/reports/`.
 - **Permanent errors** (404, 403, invalid URL) fail immediately without retry
 - Both tools maintain rate-limiting: `SearchTool` enforces 2–5 s random delay between DuckDuckGo requests
 - `main.py` additionally sleeps 2–5 s between research cycles and refreshes queue every 10 approved findings (`_QUEUE_REFRESH_EVERY`)
+
+### Search Backends
+`SearchTool` uses DuckDuckGo as the primary backend (no API key required) with an optional **Bing Web Search API** fallback:
+- Bing is activated automatically when `BING_SEARCH_API_KEY` is set in the environment.
+- Bing is only called when DuckDuckGo returns **zero results** for a query.
+- On HTTP 403 or 429 (quota exhausted), `_bing_quota_exhausted` is set to `True` and Bing is silently disabled for the rest of the process run — no further requests are made.
+- Bing free tier (Azure F1): 1,000 queries/month, no credit card required.
+
+**CJK language support**: `_contains_cjk(query)` checks for Chinese/Japanese/Korean characters. When detected:
+- DuckDuckGo receives `region="cn-zh"` to return locale-appropriate results.
+- Bing receives `mkt=zh-CN`.
+- Both are handled via a `TypeError` fallback for older library versions that don't accept these kwargs.
 
 ### Adaptive Research Loop
 The agent adapts its direction in three phases:

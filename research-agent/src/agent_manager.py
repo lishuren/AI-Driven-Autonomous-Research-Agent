@@ -26,6 +26,31 @@ from src.topic_graph import TopicGraph, TopicNode, MAX_DEPTH
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+# Patterns that make terrible search queries: ISO dates in full-width or ASCII
+# parens, standalone parenthesised years, and redundant separators like " - ".
+_DATE_PATTERNS = re.compile(
+    r"[（(]\d{4}[-/]\d{2}[-/]\d{2}[）)]"   # （2026-03-06） or (2026-03-06)
+    r"|[（(]\d{4}[）)]"                      # （2026） or (2026)
+)
+_SEPARATOR_RE = re.compile(r"\s*[-–—|]+\s*")
+
+
+def _make_search_query(name: str) -> str:
+    """Derive a clean, short search query from a topic name.
+
+    Removes date stamps (e.g. ``（2026-03-06）``) and normalises separators
+    (``-``, ``–``, ``—``, ``|``) to spaces so phrases like
+    ``在线 TRPG 市场分析 - 中国市场（2026-03-06）`` become
+    ``在线 TRPG 市场分析 中国市场``.
+    """
+    q = _DATE_PATTERNS.sub("", name)
+    q = _SEPARATOR_RE.sub(" ", q)
+    return q.strip()
+
 _REPORT_TEMPLATE = """\
 # {topic}
 
@@ -151,16 +176,22 @@ class AgentManager:
         Phase A: Quick research on root for context.
         Phase B: Analyze → decompose recursively to MAX_DEPTH.
         """
-        root_name = self._title if self._title != self.topic else (
-            self.topic.split("\n")[0][:100] if "\n" in self.topic else self.topic
-        )
-        graph = TopicGraph(root_name=root_name, root_query=root_name)
+        # Root name should always come from the topic text (first line), not
+        # the title (which is a filename suited for report output, not search).
+        root_name = self.topic.split("\n")[0][:100] if "\n" in self.topic else self.topic
+        # Strip leading Markdown heading markers (e.g. "# Heading" → "Heading")
+        root_name = re.sub(r"^#+\s*", "", root_name).strip()
+        # Derive a clean search query by removing date stamps and normalising
+        # separators — e.g. "在线 TRPG 市场分析 - 中国市场（2026-03-06）"
+        # becomes "在线 TRPG 市场分析 中国市场".
+        root_query = _make_search_query(root_name)
+        graph = TopicGraph(root_name=root_name, root_query=root_query)
         self._graph = graph
 
         logger.info("Building topic graph for %r ...", root_name)
 
         # Phase A — quick initial research on root topic for context
-        root_task = {"subtopic": root_name, "query": root_name}
+        root_task = {"subtopic": root_name, "query": root_query}
         root_result = await self._researcher.research(root_task)
         root_summary = root_result.get("summary", "")
         if root_summary:
@@ -194,9 +225,14 @@ class AgentManager:
 
         graph.mark_analyzing(node_id)
 
+        # Use the node's search query (enriched form) for planner calls when
+        # available — it contains domain context stripped from the display name
+        # (e.g. "在线TRPG 市场规模" rather than bare "市场规模").
+        planner_topic = node.query if node.query.strip() else node.name
+
         # Ask Planner if this topic is simple (leaf) or complex
         analysis = await self._planner.analyze(
-            node.name,
+            planner_topic,
             initial_summary=context_summary,
             description=node.description,
         )
@@ -213,7 +249,7 @@ class AgentManager:
         known.extend(children_names)
 
         sub_topics = await self._planner.decompose_hierarchical(
-            node.name,
+            planner_topic,
             description=node.description,
             known_subtopics=known,
         )

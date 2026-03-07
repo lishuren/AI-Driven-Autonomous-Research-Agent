@@ -21,6 +21,28 @@ def tmp_db(tmp_path):
     return str(tmp_path / "research.db")
 
 
+class TestMakeSearchQuery:
+    def test_strips_iso_date_fullwidth_parens(self):
+        from src.agent_manager import _make_search_query
+        assert _make_search_query("在线 TRPG 市场分析 - 中国市场（2026-03-06）") == "在线 TRPG 市场分析 中国市场"
+
+    def test_strips_iso_date_ascii_parens(self):
+        from src.agent_manager import _make_search_query
+        assert _make_search_query("Market analysis (2026-03-06)") == "Market analysis"
+
+    def test_normalises_dash_separator(self):
+        from src.agent_manager import _make_search_query
+        assert _make_search_query("Topic A - Sub B") == "Topic A Sub B"
+
+    def test_no_change_for_plain_query(self):
+        from src.agent_manager import _make_search_query
+        assert _make_search_query("online TRPG China market") == "online TRPG China market"
+
+    def test_strips_year_only_parens(self):
+        from src.agent_manager import _make_search_query
+        assert _make_search_query("Annual report（2025）") == "Annual report"
+
+
 class TestAgentManager:
     def _build_manager(self, topic, reports_dir, db_path, **kwargs):
         from src.agent_manager import AgentManager

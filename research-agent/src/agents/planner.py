@@ -23,6 +23,23 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# CJK Unicode ranges — mirrors search_tool._contains_cjk to avoid circular import.
+_CJK_RANGES = (
+    (0x4E00, 0x9FFF),
+    (0x3400, 0x4DBF),
+    (0x20000, 0x2A6DF),
+    (0xAC00, 0xD7AF),
+    (0x3040, 0x30FF),
+)
+
+
+def _contains_cjk(text: str) -> bool:
+    for ch in text:
+        cp = ord(ch)
+        if any(lo <= cp <= hi for lo, hi in _CJK_RANGES):
+            return True
+    return False
+
 _DECOMPOSE_PROMPT = """You are a search query generator. Convert a topic into 5 search queries.
 
 Rules:
@@ -119,6 +136,8 @@ Rules:
 - Each sub-topic needs a short name, a 2-6 word search query, a priority (1-10, higher = more important), and a one-sentence description.
 - DO NOT invent abstract or vague sub-topics. Be concrete.
 - Search queries must use real words from the topic.
+- Queries MUST be space-separated lowercase words (e.g. "tech provider integration"). NO CamelCase, NO PascalCase, NO underscores.
+- For Chinese/Japanese/Korean topics: every search query MUST include 1-2 domain-specific keywords from the main topic so that it is specific enough for a search engine. Do NOT produce bare generic phrases like "用户数量" alone — write "中国TRPG用户数量" or "在线TRPG付费用户" instead.
 
 Respond ONLY with valid JSON:
 [
@@ -242,7 +261,12 @@ class PlannerAgent:
         first_line = next(
             (line.strip() for line in topic.split("\n") if line.strip()), topic
         )
-        search_query = first_line[:150]
+        # Strip date stamps and separator noise (mirrors _make_search_query in
+        # agent_manager) so that "在线 TRPG 市场分析 - 中国市场（2026-03-06）"
+        # becomes "在线 TRPG 市场分析 中国市场" before we hit DuckDuckGo.
+        search_query = re.sub(r"[（(]\d{4}[-/]\d{2}[-/]\d{2}[）)]", "", first_line)
+        search_query = re.sub(r"[（(]\d{4}[）)]", "", search_query)
+        search_query = re.sub(r"\s*[-–—|]+\s*", " ", search_query).strip()[:150]
         try:
             results = await self._search_tool.search(search_query)
         except Exception as exc:
@@ -264,14 +288,36 @@ class PlannerAgent:
             logger.info("Pre-search vocab for %r: %s", topic, ", ".join(vocab))
         return vocab
 
+    @staticmethod
+    def _split_camel_case(token: str) -> str:
+        """Convert CamelCase / PascalCase tokens to space-separated lowercase words.
+
+        Examples::
+            'TechProviderIntegration' → 'tech provider integration'
+            'APIIntegration'          → 'api integration'
+            'already spaced'          → 'already spaced'
+        """
+        # Insert a space before every uppercase letter that follows a lowercase
+        # letter or before an uppercase letter followed by a lowercase letter
+        # (handles sequences like 'APIIntegration' → 'API Integration').
+        s = re.sub(r'([a-z])([A-Z])', r'\1 \2', token)
+        s = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1 \2', s)
+        return s.lower()
+
     def _clean_query(self, query: str, topic: str = "") -> str:
         """Strip LLM-invented filler words from a generated query.
 
-        Two-pass approach:
+        Three-pass approach:
+        0. Split any CamelCase / PascalCase tokens into separate words.
         1. Remove known filler phrases/words (fast blocklist).
         2. If the query still looks bloated (>8 words), drop any word that
            neither appears in the original topic nor in an allowed helper vocab.
         """
+        # Pass 0: expand CamelCase tokens (e.g. 'TechProviderIntegration' → 'tech provider integration')
+        words_raw = query.split()
+        words_raw = [w if ' ' in w else self._split_camel_case(w) for w in words_raw]
+        query = ' '.join(words_raw)
+
         # Pass 1: explicit blocklist of common LLM embellishments
         _FILLER = {
             "detailed", "detail", "comprehensive", "in-depth", "indepth",
@@ -289,8 +335,11 @@ class PlannerAgent:
         words = query.split()
         words = [w for w in words if w.lower().rstrip("s") not in _FILLER and w.lower() not in _FILLER]
 
-        # Pass 2: if still >8 words, keep only topic words + allowed helpers
-        if len(words) > 8 and topic:
+        # Pass 2: if still >8 words, keep only topic words + allowed helpers.
+        # Skip entirely for CJK queries — Chinese/Japanese/Korean words are not
+        # space-delimited so topic_words splitting doesn't work, and stripping
+        # them leaves an empty query.
+        if len(words) > 8 and topic and not _contains_cjk("".join(words)):
             topic_words = set(topic.lower().split())
             _ALLOWED_HELPERS = {
                 "season", "episode", "cast", "plot", "characters", "summary",
@@ -534,9 +583,27 @@ class PlannerAgent:
 
         tasks = self._parse_json(raw)
         if isinstance(tasks, list) and tasks:
+            # Build a short context prefix for CJK topics so that bare generic
+            # phrases like "用户数量" become "在线TRPG 用户数量" (searchable).
+            cjk_prefix = ""
+            if _contains_cjk(topic):
+                # Take up to the first 8 meaningful chars of the topic as context.
+                clean_topic = re.sub(r"[（(][^）)]*[）)]", "", topic).strip()
+                cjk_prefix = clean_topic[:8].strip()
+
             for task in tasks:
                 if isinstance(task, dict) and "query" in task:
                     task["query"] = self._clean_query(task["query"], topic)
+                    # For CJK: if the query is short and doesn't already contain
+                    # domain context, prepend the topic prefix.
+                    q = task["query"]
+                    if (
+                        cjk_prefix
+                        and _contains_cjk(q)
+                        and len(q.replace(" ", "")) <= 6
+                        and cjk_prefix not in q
+                    ):
+                        task["query"] = f"{cjk_prefix} {q}".strip()
                     task.setdefault("priority", 5)
                     task.setdefault("description", "")
                     task.setdefault("name", task.get("query", topic))

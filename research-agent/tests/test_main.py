@@ -185,6 +185,35 @@ class TestRequirementsFile:
         assert captured["title"] == "spec"
         assert captured["user_prompt"] is None
 
+    def test_main_requirements_file_heading_becomes_topic(self, tmp_path, monkeypatch):
+        """When a requirements file starts with a # heading and has no section markers,
+        the heading text becomes the topic and the full content becomes the user_prompt."""
+        req_file = tmp_path / "market-analysis.md"
+        heading = "Chinese Online TRPG Market Analysis"
+        spec_content = f"# {heading}\n\nDetailed analysis content goes here.\n\nMore context."
+        req_file.write_text(spec_content, encoding="utf-8")
+
+        captured: dict = {}
+
+        async def fake_run(topic, duration_seconds, title=None, user_prompt=None, **kwargs):
+            captured["topic"] = topic
+            captured["title"] = title
+            captured["user_prompt"] = user_prompt
+
+        monkeypatch.setattr("src.main.run", fake_run)
+        monkeypatch.setattr("src.main.Path.mkdir", lambda *a, **kw: None)
+
+        with patch(
+            "sys.argv",
+            ["prog", "--requirements-file", str(req_file), "--duration", "1s"],
+        ):
+            from src.main import main
+            main()
+
+        assert captured["topic"] == heading
+        assert captured["title"] == "market-analysis"
+        assert captured["user_prompt"] == spec_content
+
     def test_main_missing_requirements_file_exits(self, tmp_path, monkeypatch):
         """main() should exit with an error if the file does not exist."""
         missing = tmp_path / "nonexistent.md"

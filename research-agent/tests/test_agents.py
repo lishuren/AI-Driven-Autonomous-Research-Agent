@@ -77,7 +77,7 @@ class TestPlannerAgent:
             )
 
         assert "query" in task
-        assert "RSI" in task["query"]
+        assert "rsi" in task["query"].lower()
 
     def test_decompose_with_good_and_bad_examples(self, event_loop):
         """decompose() accepts good/bad example queries and still returns tasks."""

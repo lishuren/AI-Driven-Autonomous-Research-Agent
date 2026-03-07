@@ -1,5 +1,12 @@
 """
-search_tool.py – DuckDuckGo search wrapper.
+search_tool.py – Web search wrapper.
+
+Primary backend: DuckDuckGo (no API key needed).
+Optional fallback: Bing Web Search API — activated automatically when the
+environment variable ``BING_SEARCH_API_KEY`` is set.  Bing is only called
+when DuckDuckGo returns zero results.  Once Bing returns HTTP 403 or 429
+(quota exceeded) it is disabled for the rest of the process lifetime so no
+further requests are wasted.
 
 Returns a list of result dicts: {'title': str, 'url': str, 'body': str}.
 """
@@ -10,9 +17,12 @@ import asyncio
 import io
 import json
 import logging
+import os
 import random
 import time
+import urllib.error
 import urllib.parse
+import urllib.request
 import warnings
 from pathlib import Path
 from typing import Any, Optional
@@ -85,12 +95,190 @@ _RATE_LIMIT_MAX = 5.0
 _DEFAULT_MAX_RESULTS = 5
 # Backends for the legacy `duckduckgo_search` package.
 _SEARCH_BACKENDS = ("lite", "html", "bing")
-# Backends for the newer `ddgs` package.  Omit brave/google (robot-blocked),
-# yahoo/grokipedia/wikipedia (slow / wrong result type), and duckduckgo
-# (unreliable); mojeek + yandex reliably return results.
-_SEARCH_BACKENDS_DDGS = ("mojeek", "yandex", "duckduckgo")
+# Backends for the newer `ddgs` package.  "duckduckgo" is the primary.
+# Candidates tried and rejected:
+#   "auto"   — fires all engines in parallel; Google/Brave/Yahoo time out
+#               (~40 s) when behind the GFW; mojeek returns 403.
+#   "yandex" — consistently returns a CAPTCHA page (HTTP 200) for CJK
+#               queries; ddgs parses 0 results and raises DDGSException.
+# The ddgs built-in Bing engine has disabled=True and cannot be used here.
+# For reliable CJK coverage set BING_SEARCH_API_KEY (see _bing_search_sync).
+_SEARCH_BACKENDS_DDGS = ("duckduckgo",)
+_SEARCH_BACKENDS_DDGS_CJK = ("duckduckgo",)  # same — no free engine beats DDG
+# DDGS connection timeout (seconds).  10 s is enough for a single DDG request.
+_DDGS_TIMEOUT_DEFAULT = 10
+_DDGS_TIMEOUT_CJK = _DDGS_TIMEOUT_DEFAULT
 _RETRY_MAX_ATTEMPTS = 3
 _RETRY_BACKOFF_BASE = 1.0  # seconds
+
+
+# URL substrings that indicate a captcha or block page rather than a real result.
+_CAPTCHA_URL_MARKERS = (
+    "showcaptcha",
+    "/captcha",
+    "?captcha",
+    "&captcha",
+    "validatecaptcha",
+    "robot",
+    "challenge",
+)
+
+# Unicode ranges that indicate CJK (Chinese/Japanese/Korean) content.
+_CJK_RANGES = (
+    (0x4E00, 0x9FFF),   # CJK Unified Ideographs (most common Chinese/Japanese)
+    (0x3400, 0x4DBF),   # CJK Extension A
+    (0x20000, 0x2A6DF), # CJK Extension B
+    (0xAC00, 0xD7AF),   # Hangul Syllables (Korean)
+    (0x3040, 0x30FF),   # Hiragana + Katakana (Japanese)
+)
+
+
+def _contains_cjk(text: str) -> bool:
+    """Return True if *text* contains at least one CJK/Hangul/Kana character."""
+    for ch in text:
+        cp = ord(ch)
+        if any(lo <= cp <= hi for lo, hi in _CJK_RANGES):
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Bing Web Search API (optional fallback)
+# ---------------------------------------------------------------------------
+
+_BING_ENDPOINT = "https://api.bing.microsoft.com/v7.0/search"
+_BING_TIMEOUT = 10  # seconds
+_bing_quota_exhausted: bool = False  # set to True on 403/429; process-scoped
+_cjk_no_results_warned: bool = False  # emit the API-key hint at most once
+
+
+def _bing_search_sync(query: str, max_results: int) -> list[dict[str, Any]]:
+    """Call Bing Web Search API and return normalised results.
+
+    Returns [] immediately if:
+    - ``BING_SEARCH_API_KEY`` is not set in the environment.
+    - The quota has already been exhausted this process run.
+    - Any HTTP or network error occurs (logged, not raised).
+    """
+    global _bing_quota_exhausted
+    if _bing_quota_exhausted:
+        return []
+
+    api_key = os.environ.get("BING_SEARCH_API_KEY", "").strip()
+    if not api_key:
+        return []
+
+    market = "zh-CN" if _contains_cjk(query) else "en-US"
+    params = urllib.parse.urlencode({
+        "q": query,
+        "count": max_results,
+        "mkt": market,
+        "responseFilter": "Webpages",
+    })
+    url = f"{_BING_ENDPOINT}?{params}"
+    req = urllib.request.Request(url, headers={"Ocp-Apim-Subscription-Key": api_key})
+
+    try:
+        with urllib.request.urlopen(req, timeout=_BING_TIMEOUT) as resp:
+            payload = json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        if exc.code in (403, 429):
+            _bing_quota_exhausted = True
+            logger.warning(
+                "Bing search quota exhausted (HTTP %d) — Bing disabled for this run.",
+                exc.code,
+            )
+        else:
+            logger.warning("Bing search HTTP error for query %r: %s", query, exc)
+        return []
+    except Exception as exc:
+        logger.warning("Bing search error for query %r: %s", query, exc)
+        return []
+
+    raw: list[dict[str, Any]] = []
+    for page in payload.get("webPages", {}).get("value", []):
+        raw.append({
+            "title": page.get("name", ""),
+            "url": page.get("url", ""),
+            "body": page.get("snippet", ""),
+        })
+    results = _normalise_results(raw)
+    if results:
+        logger.info("Bing fallback returned %d results for query %r.", len(results), query)
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Tavily Search API (optional fallback, tried before Bing)
+# ---------------------------------------------------------------------------
+
+_TAVILY_ENDPOINT = "https://api.tavily.com/search"
+_TAVILY_TIMEOUT = 15  # seconds — Tavily is slightly slower than Bing
+_tavily_quota_exhausted: bool = False  # set to True on 401/429; process-scoped
+
+
+def _tavily_search_sync(query: str, max_results: int) -> list[dict[str, Any]]:
+    """Call Tavily Search API and return normalised results.
+
+    Tavily is purpose-built for AI agents and handles CJK content well.
+    Free tier: 1,000 requests/month — no credit card required.
+    Sign up at https://app.tavily.com and export the key as ``TAVILY_API_KEY``.
+
+    Returns [] immediately if:
+    - ``TAVILY_API_KEY`` is not set in the environment.
+    - The quota has already been exhausted this process run.
+    - Any HTTP or network error occurs (logged, not raised).
+    """
+    global _tavily_quota_exhausted
+    if _tavily_quota_exhausted:
+        return []
+
+    api_key = os.environ.get("TAVILY_API_KEY", "").strip()
+    if not api_key:
+        return []
+
+    payload = json.dumps({
+        "api_key": api_key,
+        "query": query,
+        "max_results": max_results,
+        "search_depth": "basic",
+        "include_answer": False,
+    }).encode()
+    req = urllib.request.Request(
+        _TAVILY_ENDPOINT,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=_TAVILY_TIMEOUT) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 429):
+            _tavily_quota_exhausted = True
+            logger.warning(
+                "Tavily search quota exhausted (HTTP %d) — Tavily disabled for this run.",
+                exc.code,
+            )
+        else:
+            logger.warning("Tavily search HTTP error for query %r: %s", query, exc)
+        return []
+    except Exception as exc:
+        logger.warning("Tavily search error for query %r: %s", query, exc)
+        return []
+
+    raw: list[dict[str, Any]] = []
+    for item in data.get("results", []):
+        raw.append({
+            "title": item.get("title", ""),
+            "url": item.get("url", ""),
+            "body": item.get("content", ""),
+        })
+    results = _normalise_results(raw)
+    if results:
+        logger.info("Tavily fallback returned %d results for query %r.", len(results), query)
+    return results
 
 
 def _normalise_results(raw_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -107,6 +295,13 @@ def _normalise_results(raw_results: list[dict[str, Any]]) -> list[dict[str, Any]
 
         if not (url or title or body):
             continue
+
+        # Drop results whose URL is a captcha / robot-challenge page.
+        url_lower = url.lower()
+        if any(marker in url_lower for marker in _CAPTCHA_URL_MARKERS):
+            logger.info("Filtered captcha/block URL from results: %s", url[:80])
+            continue
+
         normalised.append({"title": title, "url": url, "body": body})
     return normalised
 
@@ -142,7 +337,13 @@ def _is_transient_error(exc: Exception) -> bool:
 def _search_sync(query: str, max_results: int) -> list[dict[str, Any]]:
     """Perform a synchronous DuckDuckGo text search with retry logic."""
     last_error: Optional[Exception] = None
-    
+
+    # CJK queries need a locale hint so DuckDuckGo returns relevant results.
+    is_cjk = _contains_cjk(query)
+    region: Optional[str] = "cn-zh" if is_cjk else None
+    # CJK auto-backend probes multiple search engines in parallel — needs more time.
+    ddgs_timeout = _DDGS_TIMEOUT_CJK if is_cjk else _DDGS_TIMEOUT_DEFAULT
+
     for attempt in range(1, _RETRY_MAX_ATTEMPTS + 1):
         try:
             using_new_ddgs = False
@@ -158,18 +359,26 @@ def _search_sync(query: str, max_results: int) -> list[dict[str, Any]]:
                     message=r".*renamed to `ddgs`.*",
                     category=RuntimeWarning,
                 )
-                with DDGS() as ddgs:
+                with DDGS(timeout=ddgs_timeout) as ddgs:
                     if using_new_ddgs:
                         # Use the ddgs-specific backend list — its backend names differ
                         # from duckduckgo_search, and passing an unknown name causes the
                         # library to silently fall back to "auto" (all engines, very slow).
+                        # CJK queries use an extended list: try "duckduckgo" first, then
+                        # "auto" (Google/Brave/Yahoo/Bing in parallel) if no results.
+                        backends = _SEARCH_BACKENDS_DDGS_CJK if is_cjk else _SEARCH_BACKENDS_DDGS
                         backend_error = None
-                        for backend in _SEARCH_BACKENDS_DDGS:
+                        for backend in backends:
                             try:
-                                results = list(
-                                    ddgs.text(query, max_results=max_results, backend=backend)
-                                )
+                                kwargs: dict[str, Any] = {
+                                    "max_results": max_results,
+                                    "backend": backend,
+                                }
+                                if region:
+                                    kwargs["region"] = region
+                                results = list(ddgs.text(query, **kwargs))
                             except TypeError:
+                                # Older DDGS versions may not accept region/backend kwargs.
                                 results = list(ddgs.text(query, max_results=max_results))
                             except Exception as exc:
                                 backend_error = exc
@@ -190,9 +399,13 @@ def _search_sync(query: str, max_results: int) -> list[dict[str, Any]]:
                     backend_error: Optional[Exception] = None
                     for backend in _SEARCH_BACKENDS:
                         try:
-                            results = list(
-                                ddgs.text(query, max_results=max_results, backend=backend)
-                            )
+                            kwargs_legacy: dict[str, Any] = {
+                                "max_results": max_results,
+                                "backend": backend,
+                            }
+                            if region:
+                                kwargs_legacy["region"] = region
+                            results = list(ddgs.text(query, **kwargs_legacy))
                         except TypeError:
                             # Some DDGS implementations do not accept a `backend` kwarg.
                             results = list(ddgs.text(query, max_results=max_results))
@@ -249,7 +462,15 @@ def _search_sync(query: str, max_results: int) -> list[dict[str, Any]]:
 
 
 class SearchTool:
-    """Async-friendly wrapper around DuckDuckGo search."""
+    """Async-friendly wrapper around DuckDuckGo search with API fallbacks.
+
+    Fallback chain when DuckDuckGo returns zero results:
+    1. Tavily Search API — if ``TAVILY_API_KEY`` is set (recommended for CJK).
+    2. Bing Web Search API — if ``BING_SEARCH_API_KEY`` is set.
+
+    Both APIs offer a free tier of ~1,000 queries/month with no credit card.
+    Either key (or both) can be set independently.
+    """
 
     def __init__(self, max_results: int = _DEFAULT_MAX_RESULTS) -> None:
         self.max_results = max_results
@@ -274,7 +495,49 @@ class SearchTool:
         except Exception as exc:
             logger.warning("Search executor error for query %r: %s", query, exc)
             results = []
+
+        # API fallbacks — tried in order when DDG returned nothing.
+        # 1. Tavily (purpose-built for AI agents, strong CJK coverage)
+        if not results:
+            try:
+                results = await loop.run_in_executor(
+                    None, _tavily_search_sync, query, self.max_results
+                )
+            except Exception as exc:
+                logger.warning("Tavily fallback executor error for query %r: %s", query, exc)
+                results = []
+
+        # 2. Bing Web Search API
+        if not results:
+            try:
+                results = await loop.run_in_executor(
+                    None, _bing_search_sync, query, self.max_results
+                )
+            except Exception as exc:
+                logger.warning("Bing fallback executor error for query %r: %s", query, exc)
+                results = []
+
         self._last_call = time.monotonic()
         logger.info("Search for %r returned %d results.", query, len(results))
         SearchLogger.log(query, results)
+
+        # One-time advisory when every backend returned nothing and no API
+        # keys are configured.  Most actionable signal in the log.
+        if not results and _contains_cjk(query):
+            global _cjk_no_results_warned
+            if not _cjk_no_results_warned:
+                _cjk_no_results_warned = True
+                tavily_set = bool(os.environ.get("TAVILY_API_KEY", "").strip())
+                bing_set = bool(os.environ.get("BING_SEARCH_API_KEY", "").strip())
+                if not tavily_set and not bing_set:
+                    logger.warning(
+                        "CJK search returned 0 results and no API fallback keys are "
+                        "set.  DuckDuckGo may be rate-limiting this host for "
+                        "Chinese/Japanese/Korean queries.  Set one of:\n"
+                        "  TAVILY_API_KEY     — https://app.tavily.com (recommended, "
+                        "purpose-built for AI agents)\n"
+                        "  BING_SEARCH_API_KEY — Azure Cognitive Services\n"
+                        "Both offer ~1,000 free queries/month with no credit card."
+                    )
+
         return results
