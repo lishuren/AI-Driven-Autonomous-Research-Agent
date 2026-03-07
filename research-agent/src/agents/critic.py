@@ -155,7 +155,7 @@ class CriticAgent:
         return None
 
     async def review(self, task: str, summary: str) -> dict[str, Any]:
-        """Evaluate *summary* for code-readiness.
+        """Evaluate *summary* for research quality.
 
         Returns a dict with at minimum:
         ``{'status': 'PROCEED'|'REJECT', 'missing': str}``.
@@ -165,8 +165,8 @@ class CriticAgent:
                 "status": "REJECT",
                 "checks": {
                     "logical_steps": False,
-                    "math_formulas": False,
-                    "python_libraries": False,
+                    "specific_details": False,
+                    "task_relevant": False,
                 },
                 "missing": "Empty summary – no content was retrieved.",
             }
