@@ -17,7 +17,7 @@ research-agent/
 │   │   └── critic.py        # Code-readiness auditor (the Gatekeeper)
 │   ├── tools/
 │   │   ├── search_tool.py   # DuckDuckGo search wrapper
-│   │   └── scraper_tool.py  # BeautifulSoup web scraper
+│   │   └── scraper_tool.py  # Playwright headless Chromium scraper
 │   └── database/
 │       └── knowledge_base.py  # SQLite + optional ChromaDB vector store
 ├── data/
@@ -138,7 +138,7 @@ python -m pytest tests/ -v
 |-----------|---------|
 | LLM | [Ollama](https://ollama.ai/) (local) |
 | Search | [duckduckgo-search](https://github.com/deedy5/duckduckgo_search) |
-| Scraping | [BeautifulSoup4](https://www.crummy.com/software/BeautifulSoup/) |
+| Scraping | [Playwright](https://playwright.dev/python/) (headless Chromium) |
 | Vector store | [ChromaDB](https://www.trychroma.com/) *(optional)* |
 | Structured DB | SQLite via [aiosqlite](https://github.com/omnilib/aiosqlite) |
 | Concurrency | Python `asyncio` |

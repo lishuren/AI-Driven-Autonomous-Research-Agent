@@ -50,20 +50,39 @@ class TestSearchTool:
 
 class TestScraperTool:
     def test_scrape_returns_text(self, event_loop):
-        """ScraperTool.scrape should return extracted text."""
+        """ScraperTool.scrape should return text after JS rendering."""
         from src.tools.scraper_tool import ScraperTool
 
-        with patch("src.tools.scraper_tool._fetch_sync", return_value="Hello world"):
+        mock_page = AsyncMock()
+        mock_page.goto = AsyncMock()
+        mock_page.inner_text = AsyncMock(return_value="Hello world\n  \nMore text")
+
+        mock_browser = AsyncMock()
+        mock_browser.new_page = AsyncMock(return_value=mock_page)
+        mock_browser.close = AsyncMock()
+
+        mock_pw = MagicMock()
+        mock_pw.chromium.launch = AsyncMock(return_value=mock_browser)
+
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_pw)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("src.tools.scraper_tool.async_playwright", return_value=mock_ctx):
             tool = ScraperTool()
             result = event_loop.run_until_complete(tool.scrape("https://example.com"))
 
-        assert result == "Hello world"
+        assert result == "Hello world\nMore text"
 
     def test_scrape_returns_none_on_failure(self, event_loop):
-        """ScraperTool.scrape should return None when fetch fails."""
+        """ScraperTool.scrape should return None when Playwright raises."""
         from src.tools.scraper_tool import ScraperTool
 
-        with patch("src.tools.scraper_tool._fetch_sync", return_value=None):
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(side_effect=Exception("browser launch failed"))
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("src.tools.scraper_tool.async_playwright", return_value=mock_ctx):
             tool = ScraperTool()
             result = event_loop.run_until_complete(tool.scrape("https://bad.url"))
 
