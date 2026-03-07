@@ -1,8 +1,9 @@
 """
-critic.py – Quality Assurance / Code-Readiness auditor.
+critic.py – Quality Assurance auditor.
 
-Reviews research summaries and decides whether they contain enough detail
-to write executable code (PROCEED) or need more specific follow-up (REJECT).
+Reviews research summaries and decides whether they contain enough detail,
+specificity, and clarity to be accepted as high-quality research findings.
+Handles both technical and non-technical topics flexibly.
 """
 
 from __future__ import annotations
@@ -17,26 +18,31 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-_CRITIC_PROMPT = """You are a Senior Software Engineer performing a strict code-readiness audit.
+_CRITIC_PROMPT = """You are a Senior Research Quality Auditor.
 
 Review the following research summary for the task: "{task}"
 
-Does the summary contain:
-1. Logical Steps / Algorithm? (Yes/No)
-2. Mathematical Formulas? (Yes/No)
-3. Python Library Dependencies? (Yes/No)
+ASSESSMENT RULES:
+- For TECHNICAL topics (code, algorithms, math): Check for logical steps, formulas, and library dependencies
+- For GENERAL topics (history, facts, entertainment, news): Check for detailed, specific information with proper structure
+- For MIXED topics: Apply relevant criteria from both categories
+
+Evaluate:
+1. Logical Steps / Clear Structure? (explanation or algorithm present)
+2. Specific Details? (concrete facts, not vague)
+3. Relevant to Task? (directly addresses what was asked)
 
 Decision rules:
 - If ALL three checks are YES → output status: PROCEED
-- If ANY check is NO → output status: REJECT and list EXACTLY what is missing
+- If ANY check is NO → output status: REJECT and list what is missing
 
 Respond ONLY with JSON (no extra text):
 {{
   "status": "PROCEED" | "REJECT",
   "checks": {{
     "logical_steps": true | false,
-    "math_formulas": true | false,
-    "python_libraries": true | false
+    "specific_details": true | false,
+    "task_relevant": true | false
   }},
   "missing": "<concise description of what is missing, or empty string if PROCEED>"
 }}
@@ -59,33 +65,40 @@ _HEURISTIC_LIBRARY_PATTERNS = [
 
 
 def _heuristic_check(summary: str) -> dict[str, Any]:
-    """Quick regex-based code-readiness check used as Ollama fallback."""
-    has_steps = bool(re.search(r"(\d+\.\s|\bstep\b|\bfirst\b|\bthen\b)", summary, re.I))
-    has_formulas = any(re.search(p, summary, re.I) for p in _HEURISTIC_FORMULA_PATTERNS)
-    has_libs = any(re.search(p, summary, re.I) for p in _HEURISTIC_LIBRARY_PATTERNS)
+    """Quick regex-based quality check used as Ollama fallback."""
+    # Check for logical structure/steps (numbered lists, procedural markers, clear sections)
+    has_steps = bool(re.search(r"(\d+\.\s|step\s*\d|first|then|next|finally)", summary, re.I))
+    
+    # Check for specific details (numbers, names, dates, technical terms)
+    has_specifics = bool(re.search(r"(\d{1,4}|[A-Z][a-z]+|:\s|—|•|★)", summary))
+    
+    # Check if content is substantive (not too short, has some detail)
+    is_substantive = len(summary) > 150 and summary.count(" ") > 20
+    
+    task_relevant = is_substantive  # if substantive and specific, likely relevant
 
     missing_parts = []
     if not has_steps:
-        missing_parts.append("step-by-step algorithm")
-    if not has_formulas:
-        missing_parts.append("mathematical formulas")
-    if not has_libs:
-        missing_parts.append("Python library dependencies")
+        missing_parts.append("clear structure/organization")
+    if not has_specifics:
+        missing_parts.append("specific details")
+    if not task_relevant:
+        missing_parts.append("sufficient depth/content")
 
     status = "PROCEED" if not missing_parts else "REJECT"
     return {
         "status": status,
         "checks": {
             "logical_steps": has_steps,
-            "math_formulas": has_formulas,
-            "python_libraries": has_libs,
+            "specific_details": has_specifics,
+            "task_relevant": task_relevant,
         },
         "missing": ", ".join(missing_parts),
     }
 
 
 class CriticAgent:
-    """Evaluates whether a research summary is ready for code generation."""
+    """Evaluates whether a research summary meets quality standards for acceptance."""
 
     def __init__(
         self,

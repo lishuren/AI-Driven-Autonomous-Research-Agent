@@ -16,15 +16,24 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-_DECOMPOSE_PROMPT = """You are an expert research planner specialising in technical topics.
+_DECOMPOSE_PROMPT = """You are an expert research decomposition specialist.
 
 Your task: Given the high-level topic below, decompose it into exactly 5 distinct,
-technical sub-topics. For each sub-topic, provide ONE highly specific search query
-that would yield Python implementation details, mathematical formulas, or concrete
-algorithmic steps. Avoid vague questions like "What is X?".
+specific sub-topics or research questions. Each query should be directly relevant 
+to the topic as stated by the user - do NOT add extra context or reframe the topic 
+unless necessary for clarity.
 
-GOOD example query: "RSI indicator mathematical formula Python pandas implementation"
-BAD example query: "What is RSI?"
+Guidelines:
+- If the topic is technical, focus on implementation, formulas, and algorithms.
+- If the topic is general knowledge, focus on facts, history, or key concepts.
+- If the topic is about a TV series, focus on plot, characters, episodes, and events.
+- Stay faithful to the user's intent - don't add dimensions they didn't ask for.
+
+GOOD example for "Westworld S3 and S4": "Westworld season 3 plot summary main events"
+BAD example: "machine learning model Python implementation for predicting Westworld season ratings"
+
+GOOD example for "RSI trading": "RSI indicator mathematical formula Python pandas"
+BAD example: "What is RSI?"
 
 Topic: {topic}
 
@@ -113,12 +122,13 @@ class PlannerAgent:
 
     def _fallback_tasks(self, topic: str) -> list[dict[str, str]]:
         """Return default tasks when the LLM is unavailable."""
+        # Generate topic-agnostic fallback queries
         keywords = [
-            f"{topic} algorithm implementation python",
-            f"{topic} mathematical formula derivation",
-            f"{topic} python library pandas numpy example",
-            f"{topic} step by step tutorial code",
-            f"{topic} performance optimisation python",
+            f"{topic} overview summary",
+            f"{topic} main concepts key points",
+            f"{topic} examples use cases",
+            f"{topic} advantages disadvantages comparison",
+            f"{topic} best practices tips tutorial",
         ]
         return [{"subtopic": topic, "query": q} for q in keywords]
 

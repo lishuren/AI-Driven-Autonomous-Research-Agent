@@ -91,6 +91,7 @@ Important:
 - The CLI default request is `--model qwen2.5:7b`.
 - If the requested model is not installed, the app automatically falls back to a local installed model and logs a warning.
 - To avoid accidental model changes between runs, pass `--model` explicitly.
+- To use a custom data directory, specify `--data-dir /your/path` (reports go to `/your/path/reports` and db to `/your/path/research.db`).
 
 ## Model Guide: How to Specify and Choose a Model
 
@@ -125,7 +126,28 @@ Model differences (typical):
 Tip:
 - Use the same topic and duration when comparing models, then compare reports in `data/reports/`.
 
-## 7. Find the generated report
+## 7. (Optional) Using a custom data directory
+
+By default, all reports and databases go to `data/reports/` and `data/research.db`.
+If you want to use a different base directory, use `--data-dir`:
+
+```bash
+python -m src.main --topic "Stock Trading Strategies" --duration 10m --model qwen2.5:7b --data-dir /my/custom/data
+```
+
+This will store reports in `/my/custom/data/reports/` and the database in `/my/custom/data/research.db`.
+
+You can also override individual paths if needed:
+
+```bash
+# Use default reports but custom db location
+python -m src.main --topic "Reinforcement Learning" --duration 10m --db-path /tmp/research.db
+
+# Use custom reports but default db
+python -m src.main --topic "Reinforcement Learning" --duration 10m --reports-dir /my/reports
+```
+
+## 8. Find the generated report
 
 Reports are written to:
 
@@ -141,7 +163,7 @@ ls data/reports
 
 The report filename is a sanitized version of the topic or requirements filename stem.
 
-## 8. Common issues
+## 9. Common issues
 
 1. Ollama connection errors:
 

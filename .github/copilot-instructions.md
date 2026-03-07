@@ -3,9 +3,9 @@
 ## Project Overview
 
 This is an **AI-Driven Autonomous Research Agent** — a recursive agentic engine that
-autonomously researches technical topics for extended durations (default 8 hours) and
-produces *code-ready* Markdown reports. It runs locally against an Ollama LLM and uses
-DuckDuckGo for live web searches.
+autonomously researches diverse topics (technical, general knowledge, entertainment, etc.)
+for extended durations (default 8 hours) and produces detailed Markdown reports. It runs
+locally against an Ollama LLM and uses DuckDuckGo for live web searches.
 
 ---
 
@@ -18,7 +18,7 @@ research-agent/src/
 ├── agents/
 │   ├── planner.py       # Decomposes topics into search tasks via Ollama
 │   ├── researcher.py    # Search → Scrape → Summarise pipeline
-│   └── critic.py        # Code-readiness gatekeeper (PROCEED / REJECT)
+│   └── critic.py        # Quality auditor (PROCEED / REJECT) – flexible for all topic types
 ├── tools/
 │   ├── search_tool.py   # DuckDuckGo async wrapper with rate-limiting
 │   └── scraper_tool.py  # Playwright headless Chromium scraper (20 000 char cap)
@@ -49,9 +49,14 @@ CLI (main.py)
 
 ### Critic Loop (quality gate)
 Every research result must pass three checks before being accepted:
-1. **Logical Steps** (algorithm / pseudocode present)
-2. **Mathematical Formulas** (LaTeX or formula-like expressions present)
-3. **Python Library Dependencies** listed
+1. **Logical Steps / Clear Structure** (organized and coherent)
+2. **Specific Details** (concrete facts, not vague)
+3. **Task Relevant** (directly addresses the research question)
+
+The Critic intelligently adapts to topic type:
+- **Technical topics**: May additionally verify algorithms, formulas, library dependencies
+- **General topics**: Focuses on accuracy, specificity, and clarity
+- **Mixed topics**: Applies criteria relevant to the content
 
 Failure on any check triggers a refined follow-up query (via `PlannerAgent.refine_task`)
 and re-queues the task. Maximum `_MAX_REJECT_RETRIES = 3` attempts per task.
@@ -102,8 +107,9 @@ Arguments:
 - `--duration` — flexible format: `30s`, `10m`, `1h`, `1h30m`, `2hrs`, `90min`
 - `--model` — Requested Ollama model name (default `qwen2.5:7b`); falls back to an installed local model if unavailable
 - `--ollama-url` — Ollama base URL (default `http://localhost:11434`)
-- `--reports-dir` — output directory for Markdown reports
-- `--db-path` — path to SQLite database
+- `--data-dir` — base data directory; if specified, overrides `--reports-dir` and `--db-path` defaults (e.g., `--data-dir /custom/path` uses `/custom/path/reports` and `/custom/path/research.db`)
+- `--reports-dir` — output directory for Markdown reports (default `data/reports`); overridden by `--data-dir` if specified
+- `--db-path` — path to SQLite database (default `data/research.db`); overridden by `--data-dir` if specified
 
 ---
 
@@ -150,6 +156,8 @@ Python ≥ 3.10 required. Ollama must be running locally before starting the age
 - Constants are `UPPER_SNAKE_CASE` module-level variables prefixed with `_` when internal.
 - Avoid adding external HTTP clients or LLM SDKs unless strictly necessary — prefer thin `urllib.request` calls to Ollama.
 - Do not change the Planner → Researcher → Critic pipeline ordering or remove the critic quality gate.
+- The Planner should generate queries faithful to the user's topic intent without adding unwanted technical framing.
+- The Critic should evaluate content quality based on topic type, not force all topics into a single assessment model.
 - When adding new agents, follow the same pattern: `__init__(model, ollama_base_url)`, async public method, `_call_ollama` private helper, graceful fallback when Ollama is unreachable.
 
 ---

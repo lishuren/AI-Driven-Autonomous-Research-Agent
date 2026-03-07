@@ -178,16 +178,26 @@ def _parse_args() -> argparse.Namespace:
         help="Ollama base URL (default: http://localhost:11434).",
     )
     parser.add_argument(
+        "--data-dir",
+        type=str,
+        default=None,
+        help="Base data directory. If specified, overrides --reports-dir and --db-path "
+             "defaults (e.g., --data-dir /custom/path sets reports to /custom/path/reports "
+             "and db to /custom/path/research.db).",
+    )
+    parser.add_argument(
         "--reports-dir",
         type=str,
         default="data/reports",
-        help="Directory for Markdown reports (default: data/reports).",
+        help="Directory for Markdown reports (default: data/reports). "
+             "Overridden by --data-dir if specified.",
     )
     parser.add_argument(
         "--db-path",
         type=str,
         default="data/research.db",
-        help="SQLite database path (default: data/research.db).",
+        help="SQLite database path (default: data/research.db). "
+             "Overridden by --data-dir if specified.",
     )
     return parser.parse_args()
 
@@ -332,9 +342,16 @@ def main() -> None:
         topic = args.topic
         report_title = None
 
+    # If --data-dir is provided, override reports-dir and db-path defaults
+    reports_dir = args.reports_dir
+    db_path = args.db_path
+    if args.data_dir is not None:
+        reports_dir = str(Path(args.data_dir) / "reports")
+        db_path = str(Path(args.data_dir) / "research.db")
+
     # Ensure report and data directories exist relative to CWD
-    Path(args.reports_dir).mkdir(parents=True, exist_ok=True)
-    Path(args.db_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(reports_dir).mkdir(parents=True, exist_ok=True)
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
     try:
         asyncio.run(
@@ -344,8 +361,8 @@ def main() -> None:
                 duration_seconds=duration,
                 model=args.model,
                 ollama_base_url=args.ollama_url,
-                reports_dir=args.reports_dir,
-                db_path=args.db_path,
+                reports_dir=reports_dir,
+                db_path=db_path,
             )
         )
     except KeyboardInterrupt:

@@ -19,6 +19,8 @@ _RATE_LIMIT_MIN = 2.0
 _RATE_LIMIT_MAX = 5.0
 _DEFAULT_MAX_RESULTS = 5
 _SEARCH_BACKENDS = ("lite", "html", "bing")
+_RETRY_MAX_ATTEMPTS = 3
+_RETRY_BACKOFF_BASE = 1.0  # seconds
 
 
 def _normalise_results(raw_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -39,59 +41,120 @@ def _normalise_results(raw_results: list[dict[str, Any]]) -> list[dict[str, Any]
     return normalised
 
 
+def _is_transient_error(exc: Exception) -> bool:
+    """Determine if an error is transient (retry-worthy) or permanent."""
+    error_str = str(exc).lower()
+    
+    # Transient errors: network, timeout, temporary unavailability
+    transient_keywords = {
+        "timeout", "connection", "refused", "reset", "host unreachable",
+        "temporarily unavailable", "429", "503", "dns", "resolved",
+    }
+    
+    # Permanent errors: client errors, invalid input
+    permanent_keywords = {
+        "404", "403", "401", "invalid", "not found", "forbidden",
+        "unauthorized", "malformed", "typeerror",
+    }
+    
+    if any(kw in error_str for kw in permanent_keywords):
+        return False
+    if any(kw in error_str for kw in transient_keywords):
+        return True
+    
+    # Check exception type
+    transient_types = (
+        ConnectionError, TimeoutError, OSError, PermissionError
+    )
+    return isinstance(exc, transient_types)
+
+
 def _search_sync(query: str, max_results: int) -> list[dict[str, Any]]:
-    """Perform a synchronous DuckDuckGo text search."""
-    try:
-        using_new_ddgs = False
+    """Perform a synchronous DuckDuckGo text search with retry logic."""
+    last_error: Optional[Exception] = None
+    
+    for attempt in range(1, _RETRY_MAX_ATTEMPTS + 1):
         try:
-            from ddgs import DDGS
-            using_new_ddgs = True
-        except Exception:
-            from duckduckgo_search import DDGS
+            using_new_ddgs = False
+            try:
+                from ddgs import DDGS
+                using_new_ddgs = True
+            except Exception:
+                from duckduckgo_search import DDGS
 
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore",
-                message=r".*renamed to `ddgs`.*",
-                category=RuntimeWarning,
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message=r".*renamed to `ddgs`.*",
+                    category=RuntimeWarning,
+                )
+                with DDGS() as ddgs:
+                    if using_new_ddgs:
+                        # `ddgs` exposes a different backend set and `auto` is usually the
+                        # most reliable cross-network option.
+                        return _normalise_results(
+                            list(ddgs.text(query, max_results=max_results))
+                        )
+
+                    backend_error: Optional[Exception] = None
+                    for backend in _SEARCH_BACKENDS:
+                        try:
+                            results = list(
+                                ddgs.text(query, max_results=max_results, backend=backend)
+                            )
+                        except TypeError:
+                            # Some DDGS implementations do not accept a `backend` kwarg.
+                            results = list(ddgs.text(query, max_results=max_results))
+                        except Exception as exc:
+                            backend_error = exc
+                            logger.info(
+                                "Search backend %r failed for query %r: %s",
+                                backend,
+                                query,
+                                exc,
+                            )
+                            continue
+
+                        normalised = _normalise_results(results)
+                        if normalised:
+                            return normalised
+
+                    if backend_error is not None:
+                        raise backend_error
+                    return []
+        
+        except Exception as exc:
+            last_error = exc
+            is_transient = _is_transient_error(exc)
+            
+            if not is_transient or attempt >= _RETRY_MAX_ATTEMPTS:
+                # Permanent error or max retries reached
+                logger.warning(
+                    "DuckDuckGo search failed for query %r (attempt %d/%d, %s): %s",
+                    query,
+                    attempt,
+                    _RETRY_MAX_ATTEMPTS,
+                    "transient" if is_transient else "permanent",
+                    exc,
+                )
+                break
+            
+            # Transient error - retry with exponential backoff
+            backoff = _RETRY_BACKOFF_BASE * (2 ** (attempt - 1))
+            jitter = random.uniform(0, 0.1 * backoff)
+            wait_time = backoff + jitter
+            logger.info(
+                "Transient search error for query %r (attempt %d/%d), retrying in %.1fs: %s",
+                query,
+                attempt,
+                _RETRY_MAX_ATTEMPTS,
+                wait_time,
+                exc,
             )
-            with DDGS() as ddgs:
-                if using_new_ddgs:
-                    # `ddgs` exposes a different backend set and `auto` is usually the
-                    # most reliable cross-network option.
-                    return _normalise_results(
-                        list(ddgs.text(query, max_results=max_results))
-                    )
-
-                last_error: Optional[Exception] = None
-                for backend in _SEARCH_BACKENDS:
-                    try:
-                        results = list(
-                            ddgs.text(query, max_results=max_results, backend=backend)
-                        )
-                    except TypeError:
-                        # Some DDGS implementations do not accept a `backend` kwarg.
-                        results = list(ddgs.text(query, max_results=max_results))
-                    except Exception as exc:
-                        last_error = exc
-                        logger.info(
-                            "Search backend %r failed for query %r: %s",
-                            backend,
-                            query,
-                            exc,
-                        )
-                        continue
-
-                    normalised = _normalise_results(results)
-                    if normalised:
-                        return normalised
-
-                if last_error is not None:
-                    raise last_error
-                return []
-    except Exception as exc:
-        logger.warning("DuckDuckGo search failed for query %r: %s", query, exc)
-        return []
+            time.sleep(wait_time)
+    
+    logger.warning("DuckDuckGo search exhausted all %d attempts for query %r", _RETRY_MAX_ATTEMPTS, query)
+    return []
 
 
 class SearchTool:
