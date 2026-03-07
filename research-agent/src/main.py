@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Optional
 
 from src.agent_manager import AgentManager
+from src.tools.search_tool import SearchLogger
 
 logging.basicConfig(
     level=logging.INFO,
@@ -193,6 +194,15 @@ def _parse_args() -> argparse.Namespace:
              "Overridden by --data-dir if specified.",
     )
     parser.add_argument(
+        "--search-log",
+        type=str,
+        default=None,
+        metavar="FILE",
+        help="Path to a JSONL file for logging every search query, result count, "
+             "and result domains. Disabled by default. "
+             "Example: --search-log data/search.jsonl",
+    )
+    parser.add_argument(
         "--db-path",
         type=str,
         default="data/research.db",
@@ -283,8 +293,17 @@ async def run(
                 if finding:
                     approved_count += 1
                     logger.info(
-                        "Approved finding #%d: %r", approved_count, finding["subtopic"]
+                        "Approved finding #%d: %r  (%.0f min remaining)",
+                        approved_count,
+                        finding["subtopic"],
+                        (end_time - time.monotonic()) / 60,
                     )
+
+                    # Progressive report save — partial results survive any crash/interrupt
+                    try:
+                        manager.generate_report()
+                    except Exception as report_exc:
+                        logger.warning("Progressive report save failed: %s", report_exc)
 
                     # Periodically refresh the queue
                     if approved_count % _QUEUE_REFRESH_EVERY == 0:
@@ -353,6 +372,15 @@ def main() -> None:
     Path(reports_dir).mkdir(parents=True, exist_ok=True)
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
+    # Enable optional search query log before the run starts
+    search_log_path: Optional[str] = None
+    if args.data_dir is not None:
+        search_log_path = str(Path(args.data_dir) / "search.jsonl")
+    if args.search_log is not None:
+        search_log_path = args.search_log
+    if search_log_path is not None:
+        SearchLogger.enable(search_log_path)
+
     try:
         asyncio.run(
             run(
@@ -367,6 +395,8 @@ def main() -> None:
         )
     except KeyboardInterrupt:
         logger.info("Interrupted by user.")
+    finally:
+        SearchLogger.close()
 
 
 if __name__ == "__main__":

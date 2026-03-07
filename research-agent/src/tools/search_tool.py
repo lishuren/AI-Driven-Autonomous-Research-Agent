@@ -7,13 +7,78 @@ Returns a list of result dicts: {'title': str, 'url': str, 'body': str}.
 from __future__ import annotations
 
 import asyncio
+import io
+import json
 import logging
 import random
 import time
+import urllib.parse
 import warnings
+from pathlib import Path
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Optional search query logger
+# ---------------------------------------------------------------------------
+
+class SearchLogger:
+    """Optional JSONL logger for search queries and result domains.
+
+    Disabled by default.  Call ``SearchLogger.enable(path)`` once at startup
+    (e.g. from main.py when --search-log is passed) to turn it on.
+
+    Each line written is a JSON object::
+
+        {
+            "ts": "2026-03-07T15:23:54",
+            "query": "Westworld S3 episode guide",
+            "result_count": 4,
+            "domains": ["imdb.com", "wikipedia.org", ...]
+        }
+    """
+
+    _file: Optional[io.TextIOWrapper] = None
+
+    @classmethod
+    def enable(cls, path: str) -> None:
+        """Open *path* for append and start logging.  Safe to call multiple times."""
+        if cls._file is not None:
+            return  # already enabled
+        log_path = Path(path)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        cls._file = log_path.open("a", encoding="utf-8", buffering=1)
+        logger.info("Search query log enabled: %s", log_path)
+
+    @classmethod
+    def log(cls, query: str, results: list[dict[str, Any]]) -> None:
+        """Write one log entry.  No-op when disabled."""
+        if cls._file is None:
+            return
+        domains: list[str] = []
+        for r in results:
+            url = r.get("url", "")
+            if url:
+                parsed = urllib.parse.urlparse(url)
+                host = parsed.netloc.lstrip("www.")
+                if host and host not in domains:
+                    domains.append(host)
+        entry = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "query": query,
+            "result_count": len(results),
+            "domains": domains,
+        }
+        cls._file.write(json.dumps(entry) + "\n")
+
+    @classmethod
+    def close(cls) -> None:
+        """Flush and close the log file."""
+        if cls._file is not None:
+            cls._file.flush()
+            cls._file.close()
+            cls._file = None
 
 _RATE_LIMIT_MIN = 2.0
 _RATE_LIMIT_MAX = 5.0
@@ -211,4 +276,5 @@ class SearchTool:
             results = []
         self._last_call = time.monotonic()
         logger.info("Search for %r returned %d results.", query, len(results))
+        SearchLogger.log(query, results)
         return results
