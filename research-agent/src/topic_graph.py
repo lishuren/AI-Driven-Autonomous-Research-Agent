@@ -147,6 +147,15 @@ class TopicGraph:
         # Cross-reference deduplication: existing node with same name?
         existing = self.find_by_name(name)
         if existing is not None:
+            # Guard: skip if this would create a self-loop or a cycle.
+            # A cycle occurs when parent_id is already reachable from existing
+            # (i.e. existing is an ancestor of parent).
+            if existing.id == parent_id or self._is_ancestor(existing.id, parent_id):
+                logger.warning(
+                    "Cross-reference skipped: linking %r under %r would create a cycle.",
+                    name, parent.name,
+                )
+                return existing
             # Add cross-reference edge if not already linked
             if parent_id not in existing.parent_ids:
                 existing.parent_ids.append(parent_id)
@@ -170,6 +179,21 @@ class TopicGraph:
         self._nodes[node.id] = node
         parent.children_ids.append(node.id)
         return node
+
+    def _is_ancestor(self, candidate_id: str, node_id: str) -> bool:
+        """Return True if *candidate_id* is an ancestor of *node_id* (BFS)."""
+        visited: set[str] = set()
+        queue = list(self._nodes[node_id].parent_ids) if node_id in self._nodes else []
+        while queue:
+            pid = queue.pop()
+            if pid == candidate_id:
+                return True
+            if pid in visited:
+                continue
+            visited.add(pid)
+            if pid in self._nodes:
+                queue.extend(self._nodes[pid].parent_ids)
+        return False
 
     def get_node(self, node_id: str) -> Optional[TopicNode]:
         return self._nodes.get(node_id)

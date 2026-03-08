@@ -86,6 +86,10 @@ def _fetch_usage(api_key: str) -> dict | None:
         plan_limit = acct.get("plan_limit", key_data.get("limit"))
         plan_remaining = (plan_limit - plan_used) if (plan_used is not None and plan_limit is not None) else None
         return {
+            # Key-specific usage (matches the "Usage" column on app.tavily.com/api-keys)
+            "key_usage": key_data.get("usage"),
+            "key_limit": key_data.get("limit"),
+            # Plan-level aggregated usage (across all keys on this account)
             "credits_used": plan_used,
             "credits_limit": plan_limit,
             "credits_remaining": plan_remaining,
@@ -146,13 +150,14 @@ def _probe_search(api_key: str) -> dict | None:
 # Local history tracking
 # ---------------------------------------------------------------------------
 
-def _save_history(api_key_tail: str, used: int | None, limit: int | None, remaining: int | None, source: str) -> None:
+def _save_history(api_key_tail: str, used: int | None, limit: int | None, remaining: int | None, source: str, key_usage: int | None = None) -> None:
     """Append a usage snapshot to the local JSONL history file."""
     record = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "key_tail": api_key_tail,
         "source": source,
-        "credits_used": used,
+        "key_usage": key_usage,       # per-key usage (matches website)
+        "credits_used": used,         # plan-level aggregate
         "credits_limit": limit,
         "credits_remaining": remaining,
     }
@@ -192,37 +197,42 @@ def _print_history(records: list[dict]) -> None:
         print("  No local history yet — this is the first recorded check.")
         return
 
-    print(f"\n{'─' * 72}")
+    _W = 76
+    print(f"\n{'─' * _W}")
     print(f"  Usage History  ({len(records)} record(s) in {_HISTORY_FILE.relative_to(Path.cwd()) if _HISTORY_FILE.is_relative_to(Path.cwd()) else _HISTORY_FILE})")
-    print(f"{'─' * 72}")
-    print(f"  {'Timestamp (UTC)':<26}  {'Used':>8}  {'Limit':>8}  {'Remaining':>10}  Source")
-    print(f"  {'─' * 24}  {'─' * 8}  {'─' * 8}  {'─' * 10}  {'─' * 20}")
+    print(f"{'─' * _W}")
+    print(f"  {'Timestamp (UTC)':<19}  {'Key':>7}  {'Plan':>7}  {'Limit':>7}  {'Remaining':>10}  Source")
+    print(f"  {'─' * 19}  {'─' * 7}  {'─' * 7}  {'─' * 7}  {'─' * 10}  {'─' * 12}")
 
-    prev_used: int | None = None
+    prev_key_usage: int | None = None
     for rec in records:
         ts = rec.get("timestamp", "")[:19].replace("T", " ")
+        key_usage = rec.get("key_usage")
         used = rec.get("credits_used")
         limit = rec.get("credits_limit")
         remaining = rec.get("credits_remaining")
-        source = rec.get("source", "")[:20]
+        source = rec.get("source", "")[:12]
 
+        key_str = f"{key_usage:,}" if key_usage is not None else "—"
         used_str = f"{used:,}" if used is not None else "—"
         limit_str = f"{limit:,}" if limit is not None else "—"
         rem_str = f"{remaining:,}" if remaining is not None else "—"
 
-        # Δ delta annotation
+        # Δ delta annotation on key-specific usage
         delta = ""
-        if used is not None and prev_used is not None:
-            diff = used - prev_used
+        display_used = key_usage if key_usage is not None else used
+        prev_used = prev_key_usage
+        if display_used is not None and prev_used is not None:
+            diff = display_used - prev_used
             if diff > 0:
                 delta = f" \033[91m(+{diff:,})\033[0m"
             elif diff < 0:
                 delta = f" \033[92m({diff:,})\033[0m"
-        prev_used = used
+        prev_key_usage = display_used
 
-        print(f"  {ts:<26}  {used_str:>8}  {limit_str:>8}  {rem_str:>10}  {source}{delta}")
+        print(f"  {ts:<19}  {key_str:>7}  {used_str:>7}  {limit_str:>7}  {rem_str:>10}  {source}{delta}")
 
-    print(f"{'─' * 72}\n")
+    print(f"{'─' * _W}\n")
 
 
 def _bar(used: int, limit: int, width: int = 30) -> str:
@@ -240,22 +250,35 @@ def _print_usage(used: int | None, limit: int | None, remaining: int | None, sou
     print(f"  Tavily Credit Usage  (source: {source})")
     print(f"{'─' * 50}")
 
-    if used is None and remaining is None:
+    if used is None and remaining is None and (not extra or extra.get("key_usage") is None):
         print("  No usage data available from this endpoint.")
         print(f"{'─' * 50}\n")
         return
 
     if extra and extra.get("current_plan"):
         print(f"  Plan      : {extra['current_plan']}")
+
+    # Key-specific usage (what the website shows under "Usage" per API key)
+    if extra and extra.get("key_usage") is not None:
+        key_used = extra["key_usage"]
+        key_limit = extra.get("key_limit")
+        key_str = f"{key_used:,}"
+        if key_limit is not None:
+            key_str += f" / {key_limit:,}"
+        print(f"  This Key  : {key_str:>10}  ← matches app.tavily.com API Keys tab")
+
+    # Plan-level aggregated usage
     if used is not None:
-        print(f"  Used      : {used:>10,}")
+        print(f"  Plan Used : {used:>10,}  (all keys combined)")
     if limit is not None:
-        print(f"  Limit     : {limit:>10,}")
+        print(f"  Plan Limit: {limit:>10,}")
     if remaining is not None:
         print(f"  Remaining : {remaining:>10,}")
 
-    if used is not None and limit is not None and limit > 0:
-        print(f"  Progress  : {_bar(used, limit)}")
+    # Progress bar against plan limit
+    bar_used = extra.get("key_usage") if extra and extra.get("key_usage") is not None else used
+    if bar_used is not None and limit is not None and limit > 0:
+        print(f"  Progress  : {_bar(bar_used, limit)}")
     elif used is not None and remaining is not None:
         total_est = used + remaining
         print(f"  Progress  : {_bar(used, total_est)}  (estimated limit: {total_est:,})")
@@ -319,8 +342,9 @@ def main() -> None:
     _print_history(history)
 
     # Persist this reading if we got any data
-    if used is not None or remaining is not None:
-        _save_history(key_tail, used, limit, remaining, source)
+    key_usage_val = usage.get("key_usage") if usage else None
+    if used is not None or remaining is not None or key_usage_val is not None:
+        _save_history(key_tail, used, limit, remaining, source, key_usage=key_usage_val)
         print(f"  Snapshot saved → {_HISTORY_FILE}")
 
 

@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from collections import deque
 from pathlib import Path
 from typing import Any, Optional
@@ -55,6 +56,8 @@ def _make_search_query(name: str) -> str:
 
 _REPORT_TEMPLATE = """\
 # {topic}
+
+> **Session elapsed:** {elapsed_str}
 
 {graph_outline_section}
 {findings}
@@ -98,6 +101,7 @@ class AgentManager:
         self._max_depth = max_depth
         self.reports_dir = Path(reports_dir)
         self.reports_dir.mkdir(parents=True, exist_ok=True)
+        self._session_start: float = time.monotonic()
 
         # Budget tracker — attach to the search module so every query is recorded
         self.budget = BudgetTracker(
@@ -369,6 +373,22 @@ class AgentManager:
         if pending_leaves and not self.budget.is_exhausted():
             return await self._research_node(pending_leaves[0])
 
+        # 1a.5: Research decomposed non-leaf nodes that have no direct summary yet.
+        # This ensures every layer is searched even when the session timer expires
+        # before deeper leaves are reached.  The node's own query is searched now;
+        # bottom-up consolidation will later synthesise children summaries on top.
+        unsearched_nonleaf = sorted(
+            [
+                n for n in nodes_at_depth
+                if not n.is_leaf
+                and n.status == "analyzing"
+                and not n.summary
+            ],
+            key=lambda n: n.priority, reverse=True,
+        )
+        if unsearched_nonleaf and not self.budget.is_exhausted():
+            return await self._research_node(unsearched_nonleaf[0])
+
         # 1b: Analyze+decompose pending non-leaf nodes at current depth
         pending_nonleaf = [
             n for n in nodes_at_depth
@@ -419,6 +439,8 @@ class AgentManager:
                 if n.is_leaf and n.status == "pending" and budget_ok:
                     return True
                 if not n.is_leaf and n.status == "pending" and n.depth < self._max_depth:
+                    return True
+                if not n.is_leaf and n.status == "analyzing" and not n.summary and budget_ok:
                     return True
 
         # Check for consolidation work
@@ -714,12 +736,15 @@ class AgentManager:
     # Report Generation
     # ------------------------------------------------------------------
 
-    def generate_report(self) -> Path:
+    def generate_report(self, elapsed_seconds: Optional[float] = None) -> Path:
         """Consolidate all approved findings into a Markdown report.
 
         When a topic graph is available the report mirrors the hierarchy:
         depth-0 (root) → ``##``, depth-1 → ``###``, depth-2+ → ``####``.
         Falls back to a flat list of approved findings otherwise.
+
+        *elapsed_seconds* — if supplied, overrides the internal session clock
+        (useful for the final report call which has an accurate wall-clock value).
         """
         safe_name = re.sub(r"[^\w\-]", "_", self._title.lower())
         report_path = self.reports_dir / f"{safe_name}.md"
@@ -769,8 +794,19 @@ class AgentManager:
             )
         technical_sections = ("\n\n".join(technical_parts) + "\n\n") if technical_parts else ""
 
+        secs = elapsed_seconds if elapsed_seconds is not None else (time.monotonic() - self._session_start)
+        mins, whole_secs = divmod(int(secs), 60)
+        hours, mins = divmod(mins, 60)
+        if hours:
+            elapsed_str = f"{hours}h {mins:02d}m {whole_secs:02d}s"
+        elif mins:
+            elapsed_str = f"{mins}m {whole_secs:02d}s"
+        else:
+            elapsed_str = f"{whole_secs}s"
+
         content = _REPORT_TEMPLATE.format(
             topic=self._title,
+            elapsed_str=elapsed_str,
             graph_outline_section=graph_outline_section,
             findings=findings_block,
             technical_sections=technical_sections,
@@ -799,7 +835,13 @@ class AgentManager:
         """
         lines: list[str] = []
 
+        visited_ids: set[str] = set()
+
         def _walk(node: TopicNode, *, is_root: bool = False) -> None:
+            if node.id in visited_ids:
+                return
+            visited_ids.add(node.id)
+
             summary = node.consolidated_summary or node.summary or ""
             has_content = summary and summary != "(duplicate — skipped)"
 

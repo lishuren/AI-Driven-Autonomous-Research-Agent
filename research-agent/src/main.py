@@ -564,11 +564,11 @@ async def run(
                         finding["subtopic"],
                     )
 
-                # Progressive report save
-                try:
-                    manager.generate_report()
-                except Exception as report_exc:
-                    logger.warning("Progressive report save failed: %s", report_exc)
+            # Progressive report save after every cycle (not just on approved findings)
+            try:
+                manager.generate_report()
+            except Exception as report_exc:
+                logger.warning("Progressive report save failed: %s", report_exc)
 
             # Log once when we pass the deadline but keep going
             if past_deadline and not deadline_logged:
@@ -586,9 +586,9 @@ async def run(
 
     finally:
         # Always generate the final report
-        report_path = manager.generate_report()
-        await manager.close()
         elapsed = time.monotonic() - start_time
+        report_path = manager.generate_report(elapsed_seconds=elapsed)
+        await manager.close()
         budget_info = manager.budget.summary()
         logger.info(
             "Research session complete. Cycles: %d  Approved findings: %d  "
