@@ -22,7 +22,7 @@ _CRITIC_PROMPT = """You are a Senior Research Quality Auditor.
 
 Original research topic: "{topic}"
 Subtask being evaluated: "{task}"
-
+{user_context}
 ASSESSMENT RULES:
 - For TECHNICAL topics (code, algorithms, math): Check for logical steps, formulas, and library dependencies
 - For GENERAL topics (history, facts, entertainment, news): Check for detailed, specific information with proper structure
@@ -105,9 +105,11 @@ class CriticAgent:
         self,
         model: str = "qwen2.5:7b",
         ollama_base_url: str = "http://localhost:11434",
+        user_prompt: Optional[str] = None,
     ) -> None:
         self.model = model
         self.ollama_base_url = ollama_base_url
+        self._user_prompt = user_prompt
 
     def _call_ollama(self, prompt: str) -> Optional[str]:
         payload = json.dumps(
@@ -177,7 +179,13 @@ class CriticAgent:
                 "missing": "Empty summary – no content was retrieved.",
             }
 
-        prompt = _CRITIC_PROMPT.format(topic=topic or task, task=task, summary=summary[:6000])
+        prompt = _CRITIC_PROMPT.format(
+            topic=topic or task, task=task, summary=summary[:6000],
+            user_context=(
+                f"User instructions:\n{self._user_prompt}\n"
+                if self._user_prompt else ""
+            ),
+        )
 
         loop = asyncio.get_event_loop()
         raw = await loop.run_in_executor(None, self._call_ollama, prompt)

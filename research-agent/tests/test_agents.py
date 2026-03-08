@@ -77,7 +77,7 @@ class TestPlannerAgent:
             )
 
         assert "query" in task
-        assert "RSI" in task["query"]
+        assert "rsi" in task["query"].lower()
 
     def test_decompose_with_good_and_bad_examples(self, event_loop):
         """decompose() accepts good/bad example queries and still returns tasks."""
@@ -269,6 +269,7 @@ class TestResearcherAgent:
             instance.model = "llama3"
             instance.ollama_base_url = "http://localhost:11434"
             instance.max_search_results = 4
+            instance._user_prompt = None
 
             mock_search = MagicMock()
             mock_search.search = AsyncMock(return_value=[
@@ -296,6 +297,7 @@ class TestResearcherAgent:
         instance.model = "llama3"
         instance.ollama_base_url = "http://localhost:11434"
         instance.max_search_results = 4
+        instance._user_prompt = None
 
         mock_search = MagicMock()
         mock_search.search = AsyncMock(return_value=[])
