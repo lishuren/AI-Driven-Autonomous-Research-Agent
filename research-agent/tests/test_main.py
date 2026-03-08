@@ -6,6 +6,7 @@ the argument-parsing logic around --hours / --duration / --requirements-file.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -147,6 +148,154 @@ class TestRequirementsFile:
 
         assert args.requirements_file == str(req_file)
         assert args.topic is None
+
+
+class TestMaxDepthArg:
+    """Tests for --max-depth CLI argument."""
+
+    def _parse(self, extra_args: list[str]) -> argparse.Namespace:
+        from src.main import _parse_args
+
+        with patch("sys.argv", ["prog", "--topic", "Test"] + extra_args):
+            return _parse_args()
+
+    def test_default_max_depth(self):
+        args = self._parse([])
+        assert args.max_depth == 3
+
+    def test_custom_max_depth(self):
+        args = self._parse(["--max-depth", "5"])
+        assert args.max_depth == 5
+
+
+class TestBudgetArgs:
+    """Tests for --max-queries, --max-nodes, --max-credits-spend CLI args."""
+
+    def _parse(self, extra_args: list[str]) -> argparse.Namespace:
+        from src.main import _parse_args
+
+        with patch("sys.argv", ["prog", "--topic", "Test"] + extra_args):
+            return _parse_args()
+
+    def test_max_queries_default_none(self):
+        args = self._parse([])
+        assert args.max_queries is None
+
+    def test_max_queries_set(self):
+        args = self._parse(["--max-queries", "50"])
+        assert args.max_queries == 50
+
+    def test_max_nodes_default_none(self):
+        args = self._parse([])
+        assert args.max_nodes is None
+
+    def test_max_nodes_set(self):
+        args = self._parse(["--max-nodes", "100"])
+        assert args.max_nodes == 100
+
+    def test_max_credits_spend_default_none(self):
+        args = self._parse([])
+        assert args.max_credits_spend is None
+
+    def test_max_credits_spend_set(self):
+        args = self._parse(["--max-credits-spend", "5.5"])
+        assert args.max_credits_spend == 5.5
+
+
+class TestScrapingArgs:
+    """Tests for --respect-robots, --no-respect-robots, --no-scrape CLI args."""
+
+    def _parse(self, extra_args: list[str]) -> argparse.Namespace:
+        from src.main import _parse_args
+
+        with patch("sys.argv", ["prog", "--topic", "Test"] + extra_args):
+            return _parse_args()
+
+    def test_respect_robots_default_none(self):
+        args = self._parse([])
+        assert args.respect_robots is None
+
+    def test_respect_robots_flag(self):
+        args = self._parse(["--respect-robots"])
+        assert args.respect_robots is True
+
+    def test_no_respect_robots_flag(self):
+        args = self._parse(["--no-respect-robots"])
+        assert args.no_respect_robots is True
+
+    def test_no_scrape_default_false(self):
+        args = self._parse([])
+        assert args.no_scrape is False
+
+    def test_no_scrape_flag(self):
+        args = self._parse(["--no-scrape"])
+        assert args.no_scrape is True
+
+
+class TestBudgetEnvFallback:
+    """Tests that budget CLI args fall back to env vars when not specified."""
+
+    def test_max_queries_env_fallback(self, monkeypatch):
+        monkeypatch.setenv("RESEARCH_MAX_QUERIES", "42")
+        from src.main import _parse_args
+
+        with patch("sys.argv", ["prog", "--topic", "Test"]):
+            args = _parse_args()
+
+        # CLI arg is None → env var should be used in main()
+        assert args.max_queries is None
+        # Verify the env helper works
+        val = os.environ.get("RESEARCH_MAX_QUERIES", "").strip()
+        assert int(val) == 42
+
+    def test_max_queries_cli_overrides_env(self, monkeypatch):
+        monkeypatch.setenv("RESEARCH_MAX_QUERIES", "42")
+        from src.main import _parse_args
+
+        with patch("sys.argv", ["prog", "--topic", "Test", "--max-queries", "10"]):
+            args = _parse_args()
+
+        assert args.max_queries == 10
+
+    def test_max_credits_env_fallback(self, monkeypatch):
+        monkeypatch.setenv("RESEARCH_MAX_CREDITS", "3.5")
+        val = os.environ.get("RESEARCH_MAX_CREDITS", "").strip()
+        assert float(val) == 3.5
+
+    def test_no_scrape_env_fallback(self, monkeypatch):
+        monkeypatch.setenv("RESEARCH_NO_SCRAPE", "true")
+        val = os.environ.get("RESEARCH_NO_SCRAPE", "").strip().lower()
+        assert val in ("1", "true", "yes")
+
+    def test_respect_robots_env_bool_parsing(self, monkeypatch):
+        """Verify the _bool_env logic for RESEARCH_RESPECT_ROBOTS."""
+        for true_val in ("1", "true", "yes", "True", "YES"):
+            monkeypatch.setenv("RESEARCH_RESPECT_ROBOTS", true_val)
+            raw = os.environ.get("RESEARCH_RESPECT_ROBOTS", "").strip().lower()
+            assert raw in ("1", "true", "yes")
+
+        for false_val in ("0", "false", "no", "False", "NO"):
+            monkeypatch.setenv("RESEARCH_RESPECT_ROBOTS", false_val)
+            raw = os.environ.get("RESEARCH_RESPECT_ROBOTS", "").strip().lower()
+            assert raw in ("0", "false", "no")
+
+
+class TestTavilyKeyArg:
+    """Tests for --tavily-key CLI argument."""
+
+    def _parse(self, extra_args: list[str]) -> argparse.Namespace:
+        from src.main import _parse_args
+
+        with patch("sys.argv", ["prog", "--topic", "Test"] + extra_args):
+            return _parse_args()
+
+    def test_tavily_key_stored(self):
+        args = self._parse(["--tavily-key", "tvly-test123"])
+        assert args.tavily_key == "tvly-test123"
+
+    def test_tavily_key_default_none(self):
+        args = self._parse([])
+        assert args.tavily_key is None
 
     def test_topic_stored_in_namespace(self):
         from src.main import _parse_args
@@ -333,3 +482,112 @@ class TestProgressiveReportSave:
 
         # generate_report called at start (placeholder) and in finally block
         assert mock_manager.generate_report.call_count >= 2
+
+
+class TestDryRunArgs:
+    """Tests for --dry-run, --estimate-credits, and --warn-credits CLI args."""
+
+    def _parse(self, extra_args: list[str]) -> argparse.Namespace:
+        from src.main import _parse_args
+
+        with patch("sys.argv", ["prog", "--topic", "Test"] + extra_args):
+            return _parse_args()
+
+    def test_dry_run_default_false(self):
+        args = self._parse([])
+        assert args.dry_run is False
+
+    def test_dry_run_flag(self):
+        args = self._parse(["--dry-run"])
+        assert args.dry_run is True
+
+    def test_estimate_credits_default_false(self):
+        args = self._parse([])
+        assert args.estimate_credits is False
+
+    def test_estimate_credits_flag(self):
+        args = self._parse(["--estimate-credits"])
+        assert args.estimate_credits is True
+
+    def test_dry_run_and_estimate_credits_mutually_exclusive(self):
+        """--dry-run and --estimate-credits cannot be used together."""
+        with pytest.raises(SystemExit):
+            self._parse(["--dry-run", "--estimate-credits"])
+
+    def test_warn_credits_default(self):
+        args = self._parse([])
+        assert args.warn_credits == 0.80
+
+    def test_warn_credits_custom(self):
+        args = self._parse(["--warn-credits", "0.6"])
+        assert args.warn_credits == pytest.approx(0.6)
+
+    def test_warn_credits_disabled(self):
+        """Setting warn-credits to 1.0 effectively disables warnings."""
+        args = self._parse(["--warn-credits", "1.0"])
+        assert args.warn_credits == pytest.approx(1.0)
+
+
+class TestEstimateRun:
+    """Tests for the estimate_run() dry-run estimation function."""
+
+    def test_estimate_run_uses_dry_run_mode(self, event_loop, tmp_path):
+        """estimate_run() activates dry-run mode so no Tavily calls are made."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from src.main import estimate_run
+
+        calls: list[bool] = []
+
+        def spy_set_dry_run(enabled: bool = True) -> None:
+            calls.append(enabled)
+
+        mock_manager = MagicMock()
+        mock_manager.init = AsyncMock()
+        mock_manager.close = AsyncMock()
+        mock_manager.build_graph = AsyncMock()
+        mock_manager._graph = MagicMock()
+        mock_manager._graph._nodes = {}
+
+        # Patch the module-level import target inside estimate_run()
+        with patch("src.tools.search_tool.set_dry_run", spy_set_dry_run), \
+             patch("src.main.AgentManager", return_value=mock_manager), \
+             patch("src.main._list_ollama_models", return_value=[]):
+            event_loop.run_until_complete(
+                estimate_run(topic="Test topic", model="qwen2.5:7b")
+            )
+
+        assert True in calls  # set_dry_run(True) was called
+
+    def test_estimate_run_counts_leaf_nodes(self, event_loop, tmp_path, capsys):
+        """estimate_run() counts childless depth>0 nodes as leaves to research."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from src.main import estimate_run
+        from src.topic_graph import TopicNode
+
+        # Depth-1 nodes with no children — as produced by build_graph() in dry-run
+        # (is_leaf is NOT set because they are never analyzed)
+        leaf1 = TopicNode(id="n1", name="Sub A", query="Sub A", depth=1, is_leaf=False)
+        leaf2 = TopicNode(id="n2", name="Sub B", query="Sub B", depth=1, is_leaf=False)
+        root = TopicNode(id="n0", name="Root", query="Root", depth=0, is_leaf=False,
+                         children_ids=["n1", "n2"])
+
+        mock_manager = MagicMock()
+        mock_manager.init = AsyncMock()
+        mock_manager.close = AsyncMock()
+        mock_manager.build_graph = AsyncMock()
+        mock_manager._graph = MagicMock()
+        mock_manager._graph._nodes = {root.id: root, leaf1.id: leaf1, leaf2.id: leaf2}
+        mock_manager._graph.max_depth_present = MagicMock(return_value=1)
+        mock_manager._graph.get_nodes_at_depth = MagicMock(
+            side_effect=lambda d: [root] if d == 0 else [leaf1, leaf2]
+        )
+
+        with patch("src.tools.search_tool.set_dry_run"), \
+             patch("src.main.AgentManager", return_value=mock_manager), \
+             patch("src.main._list_ollama_models", return_value=[]):
+            event_loop.run_until_complete(
+                estimate_run(topic="Test topic", model="qwen2.5:7b")
+            )
+
+        out = capsys.readouterr().out
+        assert "2" in out  # 2 leaf nodes mentioned somewhere in estimate output

@@ -111,27 +111,32 @@ Given a topic and an optional initial summary, decide whether this topic:
 - Can be researched DIRECTLY with a few simple web searches ("leaf" topic), OR
 - Is COMPLEX and should be broken into smaller sub-topics for thorough research.
 
+Also assess the RELEVANCE of this topic to the main research question.
+
 Examples of LEAF topics: "RSI indicator formula", "Python asyncio tutorial", "GraphRAG installation guide"
 Examples of COMPLEX topics: "Design a World Extraction Service", "Stock Trading Strategies", "Build a recommendation engine"
 
 Topic: {topic}
+Main research question: {main_topic}
 {description_section}
 {summary_section}
 {user_context}
 Respond ONLY with valid JSON:
-{{"is_leaf": true | false, "reasoning": "<one sentence explanation>"}}
+{{"is_leaf": true | false, "relevance": "high" | "medium" | "low", "reasoning": "<one sentence explanation>"}}
 """
 
 _HIERARCHICAL_DECOMPOSE_PROMPT = """You are a research planner that breaks a complex topic into sub-topics.
 
 Topic: {topic}
+Main research question: {main_topic}
 {description_section}
 {user_context}
 Already known sub-topics (do NOT repeat these): {known_subtopics}
 {vocab_section}
 
 Rules:
-- Generate 3-7 sub-topics that together cover the main topic comprehensively.
+- Generate {max_children} sub-topics that together cover the main topic comprehensively.
+- Every sub-topic MUST directly serve the main research question. Do NOT generate tangential or loosely related sub-topics.
 - Sub-topics must be non-overlapping and specific.
 - Each sub-topic needs a short name, a 2-6 word search query, a priority (1-10, higher = more important), and a one-sentence description.
 - DO NOT invent abstract or vague sub-topics. Be concrete.
@@ -256,14 +261,14 @@ class PlannerAgent:
         if self._search_tool is None:
             return []
         # Truncate multi-line / requirements-file topics to a short search query.
-        # DuckDuckGo cannot handle hundreds of words; take the first non-empty
+        # Search APIs cannot handle hundreds of words; take the first non-empty
         # line and cap it at 150 characters so the lookup is actually useful.
         first_line = next(
             (line.strip() for line in topic.split("\n") if line.strip()), topic
         )
         # Strip date stamps and separator noise (mirrors _make_search_query in
         # agent_manager) so that "在线 TRPG 市场分析 - 中国市场（2026-03-06）"
-        # becomes "在线 TRPG 市场分析 中国市场" before we hit DuckDuckGo.
+        # becomes "在线 TRPG 市场分析 中国市场" before we send the query.
         search_query = re.sub(r"[（(]\d{4}[-/]\d{2}[-/]\d{2}[）)]", "", first_line)
         search_query = re.sub(r"[（(]\d{4}[）)]", "", search_query)
         search_query = re.sub(r"\s*[-–—|]+\s*", " ", search_query).strip()[:150]
@@ -511,10 +516,10 @@ class PlannerAgent:
     # Hierarchical decomposition methods
     # ------------------------------------------------------------------
 
-    async def analyze(self, topic: str, initial_summary: str = "", description: str = "") -> dict[str, Any]:
+    async def analyze(self, topic: str, initial_summary: str = "", description: str = "", main_topic: str = "") -> dict[str, Any]:
         """Decide whether *topic* is a simple leaf or needs sub-topic decomposition.
 
-        Returns ``{'is_leaf': bool, 'reasoning': str}``.
+        Returns ``{'is_leaf': bool, 'relevance': str, 'reasoning': str}``.
         """
         summary_section = (
             f"Initial research summary:\n{initial_summary[:2000]}\n"
@@ -525,6 +530,7 @@ class PlannerAgent:
         )
         prompt = _ANALYZE_PROMPT.format(
             topic=topic,
+            main_topic=main_topic or topic,
             summary_section=summary_section,
             description_section=description_section,
             user_context=self._user_context,
@@ -549,12 +555,21 @@ class PlannerAgent:
         topic: str,
         description: str = "",
         known_subtopics: Optional[list[str]] = None,
+        main_topic: str = "",
+        max_children: int = 5,
     ) -> list[dict[str, Any]]:
-        """Break a complex topic into 3-7 prioritized sub-topics.
+        """Break a complex topic into prioritized sub-topics.
+
+        *max_children* controls how many sub-topics the LLM is asked to
+        generate (adaptive based on budget).
 
         Returns a list of dicts with keys: ``name``, ``query``, ``priority``,
         ``description``.
         """
+        # Clamp to sensible bounds
+        max_children = max(1, min(max_children, 7))
+        children_label = f"{max(2, max_children - 1)}-{max_children}"
+
         known = ", ".join(known_subtopics or []) or "none"
         description_section = (
             f"Description: {description}\n" if description else ""
@@ -570,10 +585,12 @@ class PlannerAgent:
 
         prompt = _HIERARCHICAL_DECOMPOSE_PROMPT.format(
             topic=topic,
+            main_topic=main_topic or topic,
             description_section=description_section,
             user_context=self._user_context,
             known_subtopics=known,
             vocab_section=vocab_section,
+            max_children=children_label,
         )
 
         loop = asyncio.get_event_loop()

@@ -323,3 +323,175 @@ class TestAgentManager:
         assert manager._consecutive_failures == 0
         manager._planner.decompose_retrospective.assert_called_once()
         event_loop.run_until_complete(manager._kb.close())
+
+
+class TestGraphReport:
+    """Tests for graph-based generate_report and _save_tree_json."""
+
+    def _build_manager(self, topic, reports_dir, db_path, **kwargs):
+        from src.agent_manager import AgentManager
+
+        with patch("src.agent_manager.PlannerAgent"), \
+             patch("src.agent_manager.ResearcherAgent"), \
+             patch("src.agent_manager.CriticAgent"), \
+             patch("src.agent_manager.KnowledgeBase"):
+            manager = AgentManager(
+                topic=topic,
+                reports_dir=reports_dir,
+                db_path=db_path,
+                **kwargs,
+            )
+        return manager
+
+    def test_generate_report_uses_graph_hierarchy(self, tmp_path):
+        """When a graph exists, generate_report walks it hierarchically."""
+        from src.topic_graph import TopicGraph
+
+        manager = self._build_manager("AI Research", str(tmp_path / "reports"), str(tmp_path / "db"))
+        g = TopicGraph(root_name="AI Research", root_query="AI")
+        g.root.summary = "AI overview prose"
+        c1 = g.add_node(name="NLP", query="NLP", parent_id=g.root.id)
+        c2 = g.add_node(name="Vision", query="CV", parent_id=g.root.id)
+        g.mark_leaf(c1.id)
+        g.mark_leaf(c2.id)
+        g.mark_researched(c1.id, "NLP is about language.", ["https://nlp.example.com"])
+        g.mark_researched(c2.id, "Vision is about images.", ["https://cv.example.com"])
+        g.mark_consolidated(g.root.id, "AI consolidated summary")
+        manager._graph = g
+
+        report_path = manager.generate_report()
+        content = report_path.read_text()
+
+        assert "# AI Research" in content
+        assert "## Findings" in content
+        # Root summary appears as intro (no heading for root)
+        assert "AI consolidated summary" in content
+        # Children get ### headings (depth 1 → ###)
+        assert "### NLP" in content
+        assert "### Vision" in content
+        assert "NLP is about language." in content
+        assert "https://nlp.example.com" in content
+
+    def test_save_tree_json(self, tmp_path):
+        """_save_tree_json creates a JSON file alongside the report."""
+        from src.topic_graph import TopicGraph
+
+        manager = self._build_manager("AI Research", str(tmp_path / "reports"), str(tmp_path / "db"))
+        g = TopicGraph(root_name="AI Research", root_query="AI")
+        g.root.summary = "AI overview"
+        c = g.add_node(name="NLP", query="NLP", parent_id=g.root.id)
+        g.mark_leaf(c.id)
+        g.mark_researched(c.id, "NLP summary", [])
+        manager._graph = g
+
+        manager._save_tree_json()
+
+        json_files = list(manager.reports_dir.glob("*.json"))
+        assert len(json_files) == 1
+        tree = json.loads(json_files[0].read_text())
+        assert tree["name"] == "AI Research"
+        assert len(tree["children"]) == 1
+        assert tree["children"][0]["name"] == "NLP"
+
+    def test_generate_report_no_graph_flat_fallback(self, tmp_path):
+        """Without a graph, flat _approved list is used."""
+        manager = self._build_manager("Flat Topic", str(tmp_path / "reports"), str(tmp_path / "db"))
+        manager._approved = [
+            {
+                "subtopic": "Sub A",
+                "query": "sub a query",
+                "summary": "Summary of A.",
+                "source_urls": ["https://a.example.com"],
+            }
+        ]
+
+        report_path = manager.generate_report()
+        content = report_path.read_text()
+
+        assert "# Flat Topic" in content
+        assert "### Sub A" in content
+        assert "Summary of A." in content
+
+
+class TestBudgetIntegration:
+    """Tests for budget integration in AgentManager."""
+
+    def _build_manager(self, topic, reports_dir, db_path, **kwargs):
+        from src.agent_manager import AgentManager
+
+        with patch("src.agent_manager.PlannerAgent"), \
+             patch("src.agent_manager.ResearcherAgent"), \
+             patch("src.agent_manager.CriticAgent"), \
+             patch("src.agent_manager.KnowledgeBase"):
+            manager = AgentManager(
+                topic=topic,
+                reports_dir=reports_dir,
+                db_path=db_path,
+                **kwargs,
+            )
+        return manager
+
+    def test_budget_tracker_created(self, tmp_path):
+        """AgentManager should create a BudgetTracker with provided limits."""
+        manager = self._build_manager(
+            "Test", str(tmp_path / "reports"), str(tmp_path / "db"),
+            max_queries=10, max_nodes=20, max_credits=100.0,
+        )
+        assert manager.budget._max_queries == 10
+        assert manager.budget._max_nodes == 20
+        assert manager.budget._max_credits == 100.0
+
+    def test_budget_default_unlimited(self, tmp_path):
+        """Default budget should be unlimited."""
+        manager = self._build_manager(
+            "Test", str(tmp_path / "reports"), str(tmp_path / "db"),
+        )
+        assert manager.budget.can_query()
+        assert manager.budget.can_create_node()
+        assert not manager.budget.is_exhausted()
+
+    def test_has_graph_work_false_when_budget_exhausted(self, tmp_path):
+        """has_graph_work should return False for research when budget exhausted."""
+        from src.topic_graph import TopicGraph
+
+        manager = self._build_manager(
+            "Test", str(tmp_path / "reports"), str(tmp_path / "db"),
+            max_queries=0,
+        )
+        g = TopicGraph(root_name="Test", root_query="test")
+        c = g.add_node(name="Child", query="child", parent_id=g.root.id)
+        g.mark_leaf(c.id)
+        # Mark the root as researched so it doesn't show as pending decomposition work
+        g.mark_researched(g.root.id, summary="root summary")
+        manager._graph = g
+
+        # Budget is exhausted (max_queries=0), pending leaf should not count
+        assert not manager.has_graph_work()
+
+    def test_adaptive_max_children_full_budget(self, tmp_path):
+        """With full budget, should return 5."""
+        manager = self._build_manager(
+            "Test", str(tmp_path / "reports"), str(tmp_path / "db"),
+        )
+        assert manager._adaptive_max_children() == 5
+
+    def test_adaptive_max_children_low_budget(self, tmp_path):
+        """With <25% budget, should return 2."""
+        manager = self._build_manager(
+            "Test", str(tmp_path / "reports"), str(tmp_path / "db"),
+            max_queries=100,
+        )
+        # Use up 80% of queries
+        for _ in range(80):
+            manager.budget.record_query(credits=0)
+        assert manager._adaptive_max_children() == 2
+
+    def test_adaptive_max_children_critical_budget(self, tmp_path):
+        """With <10% budget remaining, should return 0 (force leaf)."""
+        manager = self._build_manager(
+            "Test", str(tmp_path / "reports"), str(tmp_path / "db"),
+            max_queries=100,
+        )
+        for _ in range(95):
+            manager.budget.record_query(credits=0)
+        assert manager._adaptive_max_children() == 0

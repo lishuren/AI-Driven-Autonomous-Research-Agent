@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 # Valid node statuses (progression order)
 _VALID_STATUSES = {"pending", "analyzing", "researching", "completed", "consolidated", "failed"}
 
-MAX_DEPTH = 5
+MAX_DEPTH = 2
 
 
 @dataclass
@@ -297,6 +297,16 @@ class TopicGraph:
     def node_count(self) -> int:
         return len(self._nodes)
 
+    def get_nodes_at_depth(self, depth: int) -> list[TopicNode]:
+        """Return all nodes at a specific depth level."""
+        return [n for n in self._nodes.values() if n.depth == depth]
+
+    def max_depth_present(self) -> int:
+        """Return the maximum depth of any node currently in the graph."""
+        if not self._nodes:
+            return 0
+        return max(n.depth for n in self._nodes.values())
+
     # ------------------------------------------------------------------
     # Outline / Display
     # ------------------------------------------------------------------
@@ -330,6 +340,49 @@ class TopicGraph:
             "nodes": {nid: n.to_dict() for nid, n in self._nodes.items()},
         }
 
+    def to_tree_dict(self, exclude_empty: bool = True) -> dict[str, Any]:
+        """Return a hierarchical tree dict rooted at the root node.
+
+        When *exclude_empty* is True (default), nodes with no summary and
+        no consolidated_summary are omitted from the output.
+        """
+        return self._node_to_tree(self._root_id, set(), exclude_empty)
+
+    def _node_to_tree(
+        self, node_id: str, seen: set[str], exclude_empty: bool,
+    ) -> Optional[dict[str, Any]]:
+        if node_id in seen or node_id not in self._nodes:
+            return None
+        seen.add(node_id)
+        node = self._nodes[node_id]
+
+        has_content = bool(node.summary or node.consolidated_summary)
+
+        children: list[dict[str, Any]] = []
+        for cid in node.children_ids:
+            child_tree = self._node_to_tree(cid, seen, exclude_empty)
+            if child_tree is not None:
+                children.append(child_tree)
+
+        # Skip this node if it has no content and no children with content
+        if exclude_empty and not has_content and not children:
+            return None
+
+        entry: dict[str, Any] = {
+            "name": node.name,
+            "depth": node.depth,
+            "status": node.status,
+        }
+        if node.summary:
+            entry["summary"] = node.summary
+        if node.consolidated_summary:
+            entry["consolidated_summary"] = node.consolidated_summary
+        if node.source_urls:
+            entry["source_urls"] = node.source_urls
+        if children:
+            entry["children"] = children
+        return entry
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "TopicGraph":
         """Restore a graph from a serialized dict."""
@@ -355,3 +408,113 @@ class TopicGraph:
         """Load a graph from a JSON file."""
         data = json.loads(path.read_text(encoding="utf-8"))
         return cls.from_dict(data)
+
+    # ------------------------------------------------------------------
+    # Node Merging by Semantic Similarity
+    # ------------------------------------------------------------------
+
+    def merge_similar_nodes(
+        self,
+        threshold: float = 0.85,
+        depth: Optional[int] = None,
+    ) -> int:
+        """Merge pending nodes that are semantically similar.
+
+        Nodes whose ``name + " " + query`` text are cosine-similar above
+        *threshold* (using ChromaDB embeddings) are merged: the
+        higher-priority node absorbs the other.
+
+        Only nodes at the given *depth* (or all pending nodes if depth is
+        ``None``) are considered. Already-completed or failed nodes are
+        skipped.
+
+        Returns the number of merges performed.
+        """
+        try:
+            import chromadb
+        except ImportError:
+            logger.info("ChromaDB not available — skipping node merge.")
+            return 0
+
+        # Collect candidate pending nodes
+        candidates = [
+            n for n in self._nodes.values()
+            if n.status == "pending"
+            and (depth is None or n.depth == depth)
+        ]
+        if len(candidates) < 2:
+            return 0
+
+        # Build texts for embedding
+        texts = [f"{n.name} {n.query}" for n in candidates]
+        ids = [n.id for n in candidates]
+
+        try:
+            client = chromadb.EphemeralClient()
+            col = client.get_or_create_collection(
+                "node_merge", metadata={"hnsw:space": "cosine"},
+            )
+            col.add(documents=texts, ids=ids)
+        except Exception as exc:
+            logger.warning("Node merge embedding failed: %s", exc)
+            return 0
+
+        merged: set[str] = set()
+        merge_count = 0
+
+        for i, node in enumerate(candidates):
+            if node.id in merged:
+                continue
+            try:
+                results = col.query(query_texts=[texts[i]], n_results=5)
+            except Exception:
+                continue
+
+            result_ids = results.get("ids", [[]])[0]
+            distances = results.get("distances", [[]])[0]
+
+            for rid, dist in zip(result_ids, distances):
+                if rid == node.id or rid in merged:
+                    continue
+                similarity = 1.0 - dist  # cosine distance → similarity
+                if similarity < threshold:
+                    continue
+
+                other = self._nodes.get(rid)
+                if other is None or other.status != "pending":
+                    continue
+
+                # Merge: keep the higher-priority node
+                keep, drop = (node, other) if node.priority >= other.priority else (other, node)
+
+                # Redirect parents of dropped node
+                for pid in drop.parent_ids:
+                    parent = self._nodes.get(pid)
+                    if parent is not None:
+                        if drop.id in parent.children_ids:
+                            parent.children_ids.remove(drop.id)
+                        if keep.id not in parent.children_ids:
+                            parent.children_ids.append(keep.id)
+                        if pid not in keep.parent_ids:
+                            keep.parent_ids.append(pid)
+
+                # Combine descriptions
+                if drop.description and drop.description not in (keep.description or ""):
+                    keep.description = f"{keep.description or ''}; {drop.description}"
+
+                # Remove the dropped node
+                del self._nodes[drop.id]
+                merged.add(drop.id)
+                merge_count += 1
+                logger.info(
+                    "Merged node %r into %r (similarity %.2f).",
+                    drop.name, keep.name, similarity,
+                )
+
+        # Clean up ephemeral collection
+        try:
+            client.delete_collection("node_merge")
+        except Exception:
+            pass
+
+        return merge_count

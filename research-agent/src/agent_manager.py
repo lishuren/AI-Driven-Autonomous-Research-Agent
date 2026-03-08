@@ -11,6 +11,7 @@ Provides:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from collections import deque
@@ -20,8 +21,9 @@ from typing import Any, Optional
 from src.agents.critic import CriticAgent
 from src.agents.planner import PlannerAgent
 from src.agents.researcher import ResearcherAgent
+from src.budget import BudgetTracker
 from src.database.knowledge_base import KnowledgeBase
-from src.tools.search_tool import SearchTool
+from src.tools.search_tool import SearchTool, set_budget
 from src.topic_graph import TopicGraph, TopicNode, MAX_DEPTH
 
 logger = logging.getLogger(__name__)
@@ -84,12 +86,27 @@ class AgentManager:
         ollama_base_url: str = "http://localhost:11434",
         reports_dir: str = "data/reports",
         db_path: str = "data/research.db",
+        max_depth: int = MAX_DEPTH,
+        max_queries: Optional[int] = None,
+        max_nodes: Optional[int] = None,
+        max_credits: Optional[float] = None,
+        warn_threshold: float = 0.80,
     ) -> None:
         self.topic = topic
         self._title = title if title is not None else topic
         self._user_prompt = user_prompt
+        self._max_depth = max_depth
         self.reports_dir = Path(reports_dir)
         self.reports_dir.mkdir(parents=True, exist_ok=True)
+
+        # Budget tracker — attach to the search module so every query is recorded
+        self.budget = BudgetTracker(
+            max_queries=max_queries,
+            max_nodes=max_nodes,
+            max_credits=max_credits,
+            warn_threshold=warn_threshold,
+        )
+        set_budget(self.budget)
 
         # Phase 1 — pass SearchTool to Planner for pre-search vocabulary grounding
         _search_tool = SearchTool(max_results=3)
@@ -131,6 +148,21 @@ class AgentManager:
         """Shut down the knowledge base."""
         await self._kb.close()
 
+    def _save_tree_json(self) -> None:
+        """Save the topic graph as a hierarchical JSON tree alongside the report.
+
+        Excludes nodes with no summary or consolidated_summary.
+        """
+        if self._graph is None:
+            return
+        safe_name = re.sub(r"[^\w\-]", "_", self._title.lower())
+        json_path = self.reports_dir / f"{safe_name}.json"
+        tree = self._graph.to_tree_dict(exclude_empty=True)
+        json_path.write_text(
+            json.dumps(tree, indent=2, ensure_ascii=False), encoding="utf-8",
+        )
+        logger.info("Topic tree JSON saved to %s", json_path)
+
     # ------------------------------------------------------------------
     # Queue Management (flat mode — kept for backward compatibility)
     # ------------------------------------------------------------------
@@ -171,22 +203,18 @@ class AgentManager:
     # ------------------------------------------------------------------
 
     async def build_graph(self) -> TopicGraph:
-        """Build the hierarchical topic graph by recursive decomposition.
+        """Build the initial topic graph (root + first layer of children).
 
         Phase A: Quick research on root for context.
-        Phase B: Analyze → decompose recursively to MAX_DEPTH.
+        Phase B: Analyze root → decompose into depth-1 children only.
+        Deeper layers are created lazily during ``run_graph()`` (BFS).
         """
-        # Root name should always come from the topic text (first line), not
-        # the title (which is a filename suited for report output, not search).
         root_name = self.topic.split("\n")[0][:100] if "\n" in self.topic else self.topic
-        # Strip leading Markdown heading markers (e.g. "# Heading" → "Heading")
         root_name = re.sub(r"^#+\s*", "", root_name).strip()
-        # Derive a clean search query by removing date stamps and normalising
-        # separators — e.g. "在线 TRPG 市场分析 - 中国市场（2026-03-06）"
-        # becomes "在线 TRPG 市场分析 中国市场".
         root_query = _make_search_query(root_name)
         graph = TopicGraph(root_name=root_name, root_query=root_query)
         self._graph = graph
+        self._current_research_depth = 0
 
         logger.info("Building topic graph for %r ...", root_name)
 
@@ -198,14 +226,29 @@ class AgentManager:
             graph.root.summary = root_summary
             graph.root.source_urls = root_result.get("source_urls", [])
 
-        # Phase B — analyze and decompose recursively
+        # Phase B — decompose root into depth-1 children only (no recursion)
         await self._decompose_node(graph, graph.root.id, root_summary)
 
+        self._save_tree_json()
         logger.info(
             "Topic graph built: %d nodes.\n%s",
             graph.node_count(), graph.get_outline(),
         )
         return graph
+
+    def _adaptive_max_children(self) -> int:
+        """Return the recommended number of children based on remaining budget.
+
+        Returns 0 when budget is critically low (force leaf).
+        """
+        frac = self.budget.budget_fraction_remaining()
+        if frac < 0.10:
+            return 0   # force leaf — almost no budget left
+        if frac < 0.25:
+            return 2
+        if frac < 0.50:
+            return 3
+        return 5
 
     async def _decompose_node(
         self,
@@ -213,21 +256,23 @@ class AgentManager:
         node_id: str,
         context_summary: str = "",
     ) -> None:
-        """Recursively decompose a node into sub-topics if it's complex."""
+        """Decompose a node into sub-topics (single level, no recursion).
+
+        Children are created at the next depth level but are not themselves
+        decomposed here — that happens lazily in ``run_graph()`` (BFS).
+        The number of children is adaptive based on remaining budget.
+        """
         node = graph.get_node(node_id)
         if node is None:
             return
 
-        if node.depth >= MAX_DEPTH:
+        if node.depth >= self._max_depth:
             graph.mark_leaf(node_id)
             logger.info("Max depth reached for %r — marking as leaf.", node.name)
             return
 
         graph.mark_analyzing(node_id)
 
-        # Use the node's search query (enriched form) for planner calls when
-        # available — it contains domain context stripped from the display name
-        # (e.g. "在线TRPG 市场规模" rather than bare "市场规模").
         planner_topic = node.query if node.query.strip() else node.name
 
         # Ask Planner if this topic is simple (leaf) or complex
@@ -235,7 +280,18 @@ class AgentManager:
             planner_topic,
             initial_summary=context_summary,
             description=node.description,
+            main_topic=self.topic,
         )
+
+        # Relevance gate: low-relevance topics become leaves immediately
+        relevance = analysis.get("relevance", "high")
+        if relevance == "low":
+            graph.mark_leaf(node_id)
+            node.status = "pending"
+            logger.info(
+                "Low relevance topic: %r — forcing leaf (not decomposing).", node.name,
+            )
+            return
 
         if analysis.get("is_leaf", False):
             graph.mark_leaf(node_id)
@@ -243,7 +299,15 @@ class AgentManager:
             logger.info("Leaf topic: %r — %s", node.name, analysis.get("reasoning", ""))
             return
 
-        # Complex topic: decompose into sub-topics
+        # Complex topic: decompose into sub-topics (one level only)
+        # Adaptive: reduce branching when budget is running low
+        max_children = self._adaptive_max_children()
+        if max_children == 0:
+            graph.mark_leaf(node_id)
+            node.status = "pending"
+            logger.info("Budget critical — forcing %r to leaf.", node.name)
+            return
+
         known = graph.get_all_researched_names()
         children_names = [c.name for c in graph.get_children(node_id)]
         known.extend(children_names)
@@ -252,6 +316,8 @@ class AgentManager:
             planner_topic,
             description=node.description,
             known_subtopics=known,
+            main_topic=self.topic,
+            max_children=max_children,
         )
 
         if not sub_topics:
@@ -260,56 +326,115 @@ class AgentManager:
             return
 
         for st in sub_topics:
-            child = graph.add_node(
+            if not self.budget.can_create_node():
+                logger.info("Node budget exhausted — stopping decomposition of %r.", node.name)
+                break
+            graph.add_node(
                 name=st.get("name", st.get("query", "")),
                 query=st.get("query", ""),
                 parent_id=node_id,
                 priority=st.get("priority", 5),
                 description=st.get("description", ""),
             )
-            # Recursively analyze each child
-            await self._decompose_node(graph, child.id)
+            self.budget.record_node()
 
     # ------------------------------------------------------------------
     # Graph-Based Research Orchestration
     # ------------------------------------------------------------------
 
     async def run_graph(self) -> Optional[dict[str, Any]]:
-        """Process the next available node in the topic graph.
+        """Process the next available node in the topic graph (BFS layer-by-layer).
 
-        Tries leaf research first, then consolidation.  Returns the approved
-        finding dict, or None if nothing was processed.
+        Processes nodes at ``_current_research_depth`` first:
+        1. Research pending leaf nodes at this depth.
+        2. Analyze+decompose pending non-leaf nodes at this depth.
+        When all nodes at the current depth are done, advance to the next depth.
+        Finally, consolidate parents bottom-up.
+
+        Returns the approved finding dict, or None if nothing was processed.
         """
         if self._graph is None:
             return None
 
-        # Priority 1: Research pending leaf nodes
-        ready = self._graph.get_ready_for_research()
-        if ready:
-            node = ready[0]
-            return await self._research_node(node)
+        depth = self._current_research_depth
 
-        # Priority 2: Consolidate parent nodes
+        # --- Step 1: Process nodes at current depth ---
+        nodes_at_depth = self._graph.get_nodes_at_depth(depth)
+
+        # 1a: Research pending leaf nodes at current depth
+        pending_leaves = sorted(
+            [n for n in nodes_at_depth if n.is_leaf and n.status == "pending"],
+            key=lambda n: n.priority, reverse=True,
+        )
+        if pending_leaves and not self.budget.is_exhausted():
+            return await self._research_node(pending_leaves[0])
+
+        # 1b: Analyze+decompose pending non-leaf nodes at current depth
+        pending_nonleaf = [
+            n for n in nodes_at_depth
+            if not n.is_leaf and n.status == "pending" and n.depth < self._max_depth
+        ]
+        if pending_nonleaf:
+            node = pending_nonleaf[0]
+            await self._decompose_node(self._graph, node.id)
+            return None  # decomposition doesn't produce a finding
+
+        # --- Step 2: Check if current depth is complete ---
+        all_done = all(
+            n.status in ("completed", "consolidated", "failed", "analyzing")
+            and (n.is_leaf or n.children_ids)  # non-leaves must have been decomposed
+            for n in nodes_at_depth
+        ) if nodes_at_depth else True
+
+        if all_done and depth < self._graph.max_depth_present():
+            self._current_research_depth = depth + 1
+            logger.info("Layer %d complete — advancing to layer %d.", depth, depth + 1)
+            # Merge similar pending nodes at the new depth to reduce redundancy
+            merged = self._graph.merge_similar_nodes(depth=depth + 1)
+            if merged:
+                logger.info("Merged %d similar nodes at depth %d.", merged, depth + 1)
+            return None  # will process next depth on next call
+
+        # --- Step 3: Consolidate parents bottom-up ---
         consolidatable = self._graph.get_ready_for_consolidation()
         if consolidatable:
-            node = consolidatable[0]
-            return await self._consolidate_node(node)
+            return await self._consolidate_node(consolidatable[0])
 
         return None
 
     def has_graph_work(self) -> bool:
-        """Return True if there are still nodes to research or consolidate."""
+        """Return True if there are still nodes to research, decompose, or consolidate."""
         if self._graph is None:
             return False
         if self._graph.is_complete():
             return False
-        ready = self._graph.get_ready_for_research()
-        consolidatable = self._graph.get_ready_for_consolidation()
-        return bool(ready or consolidatable)
+
+        # Budget exhaustion — only consolidation work may remain
+        budget_ok = not self.budget.is_exhausted()
+
+        # Check all depths for pending work
+        for depth in range(self._graph.max_depth_present() + 1):
+            nodes = self._graph.get_nodes_at_depth(depth)
+            for n in nodes:
+                if n.is_leaf and n.status == "pending" and budget_ok:
+                    return True
+                if not n.is_leaf and n.status == "pending" and n.depth < self._max_depth:
+                    return True
+
+        # Check for consolidation work
+        if self._graph.get_ready_for_consolidation():
+            return True
+
+        return False
 
     async def _research_node(self, node: TopicNode) -> Optional[dict[str, Any]]:
         """Research a single leaf node using the Researcher → Critic pipeline."""
         assert self._graph is not None
+
+        # Budget guard — stop researching when credits exhausted
+        if self.budget.is_exhausted():
+            logger.info("Budget exhausted — skipping research for %r.", node.name)
+            return None
 
         self._graph.mark_researching(node.id)
         task = {"subtopic": node.name, "query": node.query}
@@ -351,6 +476,7 @@ class AgentManager:
                 self._graph.mark_researched(
                     node.id, result["summary"], result["source_urls"],
                 )
+                self._save_tree_json()
 
                 # Feedback tracking
                 self._successful_queries.append(task["query"])
@@ -373,6 +499,7 @@ class AgentManager:
         self._failed_queries.append(task["query"])
         self._consecutive_failures += 1
         self._graph.mark_failed(node.id)
+        self._save_tree_json()
         logger.warning("Node %r exhausted retries.", node.name)
 
         # Phase 3 — stuck detection across the graph
@@ -399,6 +526,7 @@ class AgentManager:
 
         if not child_summaries:
             self._graph.mark_consolidated(node.id, "")
+            self._save_tree_json()
             return None
 
         consolidated = await self._planner.consolidate_summaries(
@@ -412,6 +540,7 @@ class AgentManager:
 
         if verdict.get("status") == "PROCEED":
             self._graph.mark_consolidated(node.id, consolidated)
+            self._save_tree_json()
 
             finding = {
                 "subtopic": f"{node.name} (consolidated)",
@@ -431,6 +560,7 @@ class AgentManager:
 
         # Mark consolidated anyway to avoid infinite loops
         self._graph.mark_consolidated(node.id, consolidated)
+        self._save_tree_json()
         return None
 
     async def _restructure_graph(self) -> None:
@@ -585,9 +715,41 @@ class AgentManager:
     # ------------------------------------------------------------------
 
     def generate_report(self) -> Path:
-        """Consolidate all approved findings into a Markdown report."""
+        """Consolidate all approved findings into a Markdown report.
+
+        When a topic graph is available the report mirrors the hierarchy:
+        depth-0 (root) → ``##``, depth-1 → ``###``, depth-2+ → ``####``.
+        Falls back to a flat list of approved findings otherwise.
+        """
         safe_name = re.sub(r"[^\w\-]", "_", self._title.lower())
         report_path = self.reports_dir / f"{safe_name}.md"
+
+        formulas: list[str] = []
+        deps: set[str] = set()
+        sources: list[str] = []
+
+        def _extract_technical(summary: str) -> None:
+            for match in re.finditer(r"\$\$.*?\$\$|\$[^$\n]+\$", summary):
+                formulas.append(match.group())
+            for match in re.finditer(r"\b(import|from)\s+([\w.]+)", summary):
+                deps.add(match.group(2).split(".")[0])
+
+        # ── graph-based hierarchical report ──────────────────────────
+        if self._graph is not None:
+            findings_block = self._graph_findings_block(
+                self._graph, _extract_technical, sources,
+            )
+        # ── flat fallback ────────────────────────────────────────────
+        elif self._approved:
+            sections: list[str] = []
+            for finding in self._approved:
+                summary = finding.get("summary", "")
+                sections.append(f"### {finding['subtopic']}\n\n{summary}")
+                _extract_technical(summary)
+                sources.extend(finding.get("source_urls", []))
+            findings_block = "## Findings\n\n" + "\n\n---\n\n".join(sections)
+        else:
+            findings_block = "## Findings\n\n_No approved findings yet._"
 
         # Graph outline section
         graph_outline_section = ""
@@ -595,32 +757,6 @@ class AgentManager:
             outline = self._graph.get_outline()
             if outline:
                 graph_outline_section = f"## Research Plan\n\n```\n{outline}\n```\n"
-
-        finding_sections: list[str] = []
-        formulas: list[str] = []
-        deps: set[str] = set()
-        sources: list[str] = []
-
-        for finding in self._approved:
-            summary = finding.get("summary", "")
-            subtopic = finding["subtopic"]
-            finding_sections.append(f"### {subtopic}\n\n{summary}")
-
-            # Extract LaTeX-style formulas (technical topics)
-            for match in re.finditer(r"\$\$.*?\$\$|\$[^$\n]+\$", summary):
-                formulas.append(match.group())
-
-            # Extract Python library names (technical topics)
-            for match in re.finditer(r"\b(import|from)\s+([\w.]+)", summary):
-                deps.add(match.group(2).split(".")[0])
-
-            sources.extend(finding.get("source_urls", []))
-
-        # Build the findings block
-        if finding_sections:
-            findings_block = "## Findings\n\n" + "\n\n---\n\n".join(finding_sections)
-        else:
-            findings_block = "## Findings\n\n_No approved findings yet._"
 
         # Only include technical sections when there is actual content
         technical_parts: list[str] = []
@@ -644,3 +780,45 @@ class AgentManager:
         report_path.write_text(content, encoding="utf-8")
         logger.info("Report written to %s", report_path)
         return report_path
+
+    # ------------------------------------------------------------------
+    # Report helper — walk graph hierarchy
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _graph_findings_block(
+        graph: TopicGraph,
+        extract_fn: Any,
+        sources: list[str],
+    ) -> str:
+        """Build the Findings section by DFS-walking the topic graph.
+
+        Heading depth follows node depth: depth-1 children → ``###``,
+        depth-2 → ``####``, etc.  The root node's own summary (if any)
+        is emitted as intro prose directly under ``## Findings``.
+        """
+        lines: list[str] = []
+
+        def _walk(node: TopicNode, *, is_root: bool = False) -> None:
+            summary = node.consolidated_summary or node.summary or ""
+            has_content = summary and summary != "(duplicate — skipped)"
+
+            if has_content:
+                if is_root:
+                    # Root summary becomes intro prose under ## Findings
+                    lines.append(summary)
+                else:
+                    heading_level = min(node.depth + 2, 6)  # depth 1→###, 2→####
+                    prefix = "#" * heading_level
+                    lines.append(f"{prefix} {node.name}\n\n{summary}")
+                extract_fn(summary)
+                sources.extend(node.source_urls)
+
+            for child in graph.get_children(node.id):
+                _walk(child)
+
+        _walk(graph.root, is_root=True)
+
+        if lines:
+            return "## Findings\n\n" + "\n\n---\n\n".join(lines)
+        return "## Findings\n\n_No approved findings yet._"

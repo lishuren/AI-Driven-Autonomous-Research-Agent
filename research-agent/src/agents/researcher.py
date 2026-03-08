@@ -2,9 +2,11 @@
 researcher.py – Search & Scrape agent.
 
 For a given task query:
-1. Searches using SearchTool (DuckDuckGo).
-2. Scrapes the top N result URLs with ScraperTool.
-3. Passes the combined raw text to Ollama for a concise summary.
+1. Searches using SearchTool (Tavily).
+2. Uses Tavily raw_content (markdown) when available.
+3. Falls back to Tavily Extract for URLs lacking raw_content.
+4. Falls back to Playwright scraping when Extract is unavailable.
+5. Passes the combined raw text to Ollama for a concise summary.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ import urllib.request
 from typing import Any, Optional
 
 from src.tools.scraper_tool import ScraperTool
-from src.tools.search_tool import SearchTool
+from src.tools.search_tool import SearchTool, _detect_language
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +27,7 @@ _SUMMARISE_PROMPT = """You are a research assistant producing concise, factual n
 
 Task: {task}
 {user_context}
+{language_hint}
 Below is raw scraped content from multiple web pages.  Write a concise summary
 (≤500 words) that directly answers the task.  Rules:
 - Report only facts that are actually present in the raw content below.
@@ -41,6 +44,8 @@ Raw content:
 Summary:"""
 
 _SCRAPE_TOP_N = 4
+_MIN_RAW_CONTENT_CHARS = 500  # threshold for "sufficient" Tavily raw_content
+_PER_PAGE_CAP = 4000
 
 
 class ResearcherAgent:
@@ -95,7 +100,14 @@ class ResearcherAgent:
             return None
 
     async def research(self, task: dict[str, Any]) -> dict[str, Any]:
-        """Execute search + scrape + summarise for *task*.
+        """Execute search + content acquisition + summarise for *task*.
+
+        Content acquisition flow:
+        1. Use Tavily ``raw_content`` (markdown) when the search already returned
+           sufficient page text (≥ ``_MIN_RAW_CONTENT_CHARS`` per result).
+        2. For URLs lacking raw_content, try Tavily Extract (1 credit / 5 URLs).
+        3. Fall back to Playwright scraping for any remaining URLs.
+        4. If everything fails, use search-result snippets.
 
         Returns a dict with keys: ``subtopic``, ``query``, ``summary``,
         ``source_urls``, ``raw_content``.
@@ -117,17 +129,56 @@ class ResearcherAgent:
                 "raw_content": "",
             }
 
-        # 2. Scrape top N results concurrently
-        urls = [r["url"] for r in results if r.get("url")]
-        scrape_tasks = [self._scraper.scrape(url) for url in urls]
-        scraped = await asyncio.gather(*scrape_tasks, return_exceptions=True)
-
-        source_urls = []
+        # 2. Content acquisition (conditional scraping)
+        source_urls: list[str] = []
         raw_parts: list[str] = []
-        for url, content in zip(urls, scraped):
-            if isinstance(content, str) and content:
+        urls_needing_content: list[str] = []
+
+        # 2a. Check Tavily raw_content first
+        for r in results:
+            url = r.get("url", "")
+            if not url:
+                continue
+            raw_content = r.get("raw_content", "")
+            if raw_content and len(raw_content) >= _MIN_RAW_CONTENT_CHARS:
                 source_urls.append(url)
-                raw_parts.append(f"--- Source: {url} ---\n{content[:4000]}")
+                raw_parts.append(
+                    f"--- Source: {url} ---\n{raw_content[:_PER_PAGE_CAP]}"
+                )
+            else:
+                urls_needing_content.append(url)
+
+        # 2b. Try Tavily Extract for URLs lacking raw_content
+        if urls_needing_content:
+            try:
+                extracted = await self._search.extract(urls_needing_content, query)
+                extracted_urls: set[str] = set()
+                for item in extracted:
+                    eurl = item.get("url", "")
+                    content = item.get("content", "")
+                    if content and eurl:
+                        source_urls.append(eurl)
+                        raw_parts.append(
+                            f"--- Source: {eurl} ---\n{content[:_PER_PAGE_CAP]}"
+                        )
+                        extracted_urls.add(eurl)
+                # Remaining URLs that Extract didn't cover
+                urls_needing_content = [
+                    u for u in urls_needing_content if u not in extracted_urls
+                ]
+            except Exception as exc:
+                logger.warning("Tavily Extract failed: %s", exc)
+
+        # 2c. Fall back to Playwright for remaining URLs
+        if urls_needing_content:
+            scrape_tasks = [self._scraper.scrape(url) for url in urls_needing_content]
+            scraped = await asyncio.gather(*scrape_tasks, return_exceptions=True)
+            for url, content in zip(urls_needing_content, scraped):
+                if isinstance(content, str) and content:
+                    source_urls.append(url)
+                    raw_parts.append(
+                        f"--- Source: {url} ---\n{content[:_PER_PAGE_CAP]}"
+                    )
 
         raw_content = "\n\n".join(raw_parts) or "\n".join(
             r.get("body", "") for r in results
@@ -138,9 +189,14 @@ class ResearcherAgent:
             f"User instructions:\n{self._user_prompt}\n"
             if self._user_prompt else ""
         )
+        lang = _detect_language(query)
+        language_hint = (
+            "Write the summary in Chinese (中文)." if lang == "zh" else ""
+        )
         prompt = _SUMMARISE_PROMPT.format(
             task=subtopic, raw_content=raw_content[:12000],
             user_context=user_context,
+            language_hint=language_hint,
         )
         loop = asyncio.get_event_loop()
         summary = await loop.run_in_executor(None, self._call_ollama, prompt)

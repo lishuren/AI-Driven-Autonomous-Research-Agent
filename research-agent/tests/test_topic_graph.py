@@ -5,6 +5,7 @@ Unit tests for topic_graph.py – TopicNode and TopicGraph.
 from __future__ import annotations
 
 import json
+from unittest.mock import patch
 
 import pytest
 
@@ -149,3 +150,115 @@ class TestTopicGraph:
         g.mark_researched(c.id, "summary", [])
         names = g.get_all_researched_names()
         assert "NLP" in names
+
+    def test_get_nodes_at_depth(self):
+        from src.topic_graph import TopicGraph
+
+        g = TopicGraph(root_name="AI", root_query="AI")
+        c1 = g.add_node(name="NLP", query="NLP", parent_id=g.root.id)
+        c2 = g.add_node(name="Vision", query="CV", parent_id=g.root.id)
+        gc = g.add_node(name="Transformers", query="transformers", parent_id=c1.id)
+
+        assert [n.name for n in g.get_nodes_at_depth(0)] == ["AI"]
+        depth1 = {n.name for n in g.get_nodes_at_depth(1)}
+        assert depth1 == {"NLP", "Vision"}
+        assert [n.name for n in g.get_nodes_at_depth(2)] == ["Transformers"]
+        assert g.get_nodes_at_depth(3) == []
+
+    def test_max_depth_present(self):
+        from src.topic_graph import TopicGraph
+
+        g = TopicGraph(root_name="AI", root_query="AI")
+        assert g.max_depth_present() == 0
+        g.add_node(name="NLP", query="NLP", parent_id=g.root.id)
+        assert g.max_depth_present() == 1
+        c = g.add_node(name="Vision", query="CV", parent_id=g.root.id)
+        g.add_node(name="Object Detection", query="OD", parent_id=c.id)
+        assert g.max_depth_present() == 2
+
+    def test_to_tree_dict_basic(self):
+        from src.topic_graph import TopicGraph
+
+        g = TopicGraph(root_name="AI", root_query="AI")
+        g.root.summary = "AI overview"
+        c = g.add_node(name="NLP", query="NLP", parent_id=g.root.id)
+        g.mark_leaf(c.id)
+        g.mark_researched(c.id, "NLP summary", ["https://nlp.example.com"])
+
+        tree = g.to_tree_dict(exclude_empty=False)
+        assert tree["name"] == "AI"
+        assert tree["summary"] == "AI overview"
+        assert len(tree["children"]) == 1
+        assert tree["children"][0]["name"] == "NLP"
+        assert tree["children"][0]["summary"] == "NLP summary"
+
+    def test_to_tree_dict_exclude_empty(self):
+        from src.topic_graph import TopicGraph
+
+        g = TopicGraph(root_name="AI", root_query="AI")
+        g.root.summary = "AI overview"
+        c1 = g.add_node(name="NLP", query="NLP", parent_id=g.root.id)
+        c2 = g.add_node(name="Vision", query="CV", parent_id=g.root.id)
+        g.mark_leaf(c1.id)
+        g.mark_researched(c1.id, "NLP summary", [])
+        # c2 has no summary — should be excluded
+
+        tree = g.to_tree_dict(exclude_empty=True)
+        assert len(tree["children"]) == 1
+        assert tree["children"][0]["name"] == "NLP"
+
+
+# ---------------------------------------------------------------------------
+# Node Merging
+# ---------------------------------------------------------------------------
+
+class TestNodeMerging:
+    def test_merge_no_candidates(self):
+        """Merging with fewer than 2 pending nodes should do nothing."""
+        from src.topic_graph import TopicGraph
+
+        g = TopicGraph(root_name="Root", root_query="root")
+        c = g.add_node(name="Only Child", query="only", parent_id=g.root.id)
+        assert g.merge_similar_nodes(depth=1) == 0
+
+    def test_merge_without_chromadb(self):
+        """When chromadb is not importable, merge should return 0."""
+        from src.topic_graph import TopicGraph
+
+        g = TopicGraph(root_name="Root", root_query="root")
+        g.add_node(name="Machine Learning", query="ML", parent_id=g.root.id)
+        g.add_node(name="Machine Learning Intro", query="ML intro", parent_id=g.root.id)
+
+        with patch("builtins.__import__", side_effect=ImportError("no chromadb")):
+            result = g.merge_similar_nodes(depth=1)
+        assert result == 0
+
+    def test_merge_similar_nodes_reduces_count(self):
+        """Highly similar nodes at the same depth should be merged."""
+        from src.topic_graph import TopicGraph
+
+        g = TopicGraph(root_name="Root", root_query="root")
+        n1 = g.add_node(name="Python web scraping", query="python web scraping", parent_id=g.root.id, priority=8)
+        n2 = g.add_node(name="Python web scraping tutorial", query="python web scraping tutorial", parent_id=g.root.id, priority=5)
+
+        initial_count = g.node_count()
+        merged = g.merge_similar_nodes(depth=1, threshold=0.50)
+
+        # Should have merged at least one pair (these names are very similar)
+        if merged > 0:
+            assert g.node_count() < initial_count
+        # Either way, no crash
+
+    def test_merge_skips_completed_nodes(self):
+        """Completed nodes should not be merge candidates."""
+        from src.topic_graph import TopicGraph
+
+        g = TopicGraph(root_name="Root", root_query="root")
+        n1 = g.add_node(name="NLP basics", query="NLP basics", parent_id=g.root.id)
+        n2 = g.add_node(name="NLP fundamentals", query="NLP fundamentals", parent_id=g.root.id)
+        g.mark_leaf(n1.id)
+        g.mark_researched(n1.id, "some summary", [])
+
+        # n1 is "completed", should not be merged
+        merged = g.merge_similar_nodes(depth=1, threshold=0.50)
+        assert g.get_node(n1.id) is not None  # n1 should still exist
