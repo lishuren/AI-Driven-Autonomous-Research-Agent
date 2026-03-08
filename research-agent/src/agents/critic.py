@@ -31,7 +31,8 @@ ASSESSMENT RULES:
 Evaluate:
 1. Logical Steps / Clear Structure? (explanation or algorithm present)
 2. Specific Details? (concrete facts, not vague)
-3. Relevant to Task? (directly addresses what was asked for the original research topic — content about an unrelated subject must be REJECTED)
+3. Relevant to Subtask? (directly addresses the SUBTASK being evaluated — it does NOT need to answer
+   the entire original topic; sub-topics contribute a focused piece of the larger research)
 
 Decision rules:
 - If ALL three checks are YES → output status: PROCEED
