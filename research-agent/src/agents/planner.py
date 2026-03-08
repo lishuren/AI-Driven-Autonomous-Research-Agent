@@ -95,14 +95,19 @@ Respond ONLY with valid JSON, no other text:
 
 _FOLLOWUP_PROMPT = """You are a search query generator.
 
-The previous research had gaps: {gaps}
-Original topic: {topic}
+The previous research on a sub-topic had gaps. Generate ONE targeted follow-up search query.
+
+Main research topic: {main_topic}
+Sub-topic being researched: {topic}
+Gaps identified: {gaps}
 {user_context}
-Generate ONE follow-up search query using only words from the topic + gap description.
-Keep the query to 2-6 words. No abstract nouns. No embellishments.
+Rules:
+- The query MUST stay relevant to the main research topic and sub-topic.
+- Be specific: include the sub-topic name or a key term from it, plus a term from the gaps.
+- Keep the query to 3-8 words. No abstract nouns. No embellishments.
 
 Respond ONLY with valid JSON:
-{{"subtopic": "{topic} (follow-up)", "query": "<2-6 word query>"}}
+{{"subtopic": "{topic} (follow-up)", "query": "<3-8 word query>"}}
 """
 
 _ANALYZE_PROMPT = """You are a research topic analyzer.
@@ -488,10 +493,11 @@ class PlannerAgent:
         )
         return self._fallback_tasks(topic)
 
-    async def refine(self, topic: str, gaps: str) -> dict[str, str]:
+    async def refine(self, topic: str, gaps: str, main_topic: str = "") -> dict[str, str]:
         """Generate a targeted follow-up task to fill the identified *gaps*."""
         prompt = _FOLLOWUP_PROMPT.format(
-            topic=topic, gaps=gaps, user_context=self._user_context,
+            topic=topic, gaps=gaps, main_topic=main_topic or topic,
+            user_context=self._user_context,
         )
 
         loop = asyncio.get_event_loop()

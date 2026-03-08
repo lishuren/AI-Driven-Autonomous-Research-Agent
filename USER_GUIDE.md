@@ -140,6 +140,28 @@ Important:
 - To avoid accidental model changes between runs, pass `--model` explicitly.
 - To use a custom data directory, specify `--data-dir /your/path` (reports go to `/your/path/reports` and db to `/your/path/research.db`).
 
+### Duration and depth
+
+`--duration` (or `--hours`) is a **hard time limit**. When it expires, the agent stops before starting any new research cycle and saves the report as-is — nothing is lost.
+
+`--max-depth` controls how many decomposition tiers are created below the root (default: `3`, meaning root + 3 levels of sub-topics). More depth = more nodes = more research time.
+
+Two scenarios you will encounter:
+
+| Scenario | Log message | What to do |
+|---|---|---|
+| Duration expires while still researching | `Duration reached — stopping research and generating report.` | Increase `--duration`, or accept the partial report |
+| Research finishes before duration | `All research work complete (N min remaining). For deeper research re-run with --max-depth X` | Re-run with the suggested `--max-depth` value |
+
+Example — run finished in 10 min of a 1h session:
+```bash
+# First run finished early at depth 3
+python -m src.main --topic "World Extraction Service" --duration 1h --max-depth 3
+
+# Re-run one tier deeper to fill the remaining time
+python -m src.main --topic "World Extraction Service" --duration 1h --max-depth 4
+```
+
 ## Estimating costs before running
 
 Before committing to a full research run, use `--dry-run` (or the equivalent
