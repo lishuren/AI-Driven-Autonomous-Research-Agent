@@ -389,10 +389,12 @@ class AgentManager:
         if unsearched_nonleaf and not self.budget.is_exhausted():
             return await self._research_node(unsearched_nonleaf[0])
 
-        # 1b: Analyze+decompose pending non-leaf nodes at current depth
+        # 1b: Analyze+decompose pending non-leaf nodes at current depth.
+        # Nodes at exactly _max_depth are included: _decompose_node() handles them
+        # by calling mark_leaf() immediately (no LLM calls), making them researchable.
         pending_nonleaf = [
             n for n in nodes_at_depth
-            if not n.is_leaf and n.status == "pending" and n.depth < self._max_depth
+            if not n.is_leaf and n.status == "pending"
         ]
         if pending_nonleaf:
             node = pending_nonleaf[0]
@@ -438,7 +440,7 @@ class AgentManager:
             for n in nodes:
                 if n.is_leaf and n.status == "pending" and budget_ok:
                     return True
-                if not n.is_leaf and n.status == "pending" and n.depth < self._max_depth:
+                if not n.is_leaf and n.status == "pending":
                     return True
                 if not n.is_leaf and n.status == "analyzing" and not n.summary and budget_ok:
                     return True
