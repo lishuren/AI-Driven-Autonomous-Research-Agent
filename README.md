@@ -157,8 +157,8 @@ back-testing methodology, and known pitfalls.
 |------|---------|-------------|
 | `--topic` | *(required\*)* | High-level research topic as inline text |
 | `--requirements-file` | *(required\*)* | Path to a file with the full research specification |
-| `--hours` | `8` | How long to run |
-| `--duration` | — | Human-readable duration (e.g. `10m`, `1h30m`, `90s`) |
+| `--hours` | `8` | Hard time limit in hours. Research stops and the report is saved when the duration expires. |
+| `--duration` | — | Hard time limit in human-readable format (e.g. `10m`, `1h30m`, `90s`). Overrides `--hours`. Research stops and the report is saved when the duration expires. If research finishes before the deadline, the agent logs a suggestion to re-run with a higher `--max-depth`. |
 | `--model` | `qwen2.5:7b` | Requested Ollama model name. Falls back to any installed local model if unavailable. |
 | `--ollama-url` | `http://localhost:11434` | Ollama base URL |
 | `--tavily-key` | *(env `TAVILY_API_KEY`)* | Tavily API key for web search |
@@ -166,7 +166,7 @@ back-testing methodology, and known pitfalls.
 | `--reports-dir` | `data/reports` | Output directory for Markdown reports |
 | `--db-path` | `data/research.db` | SQLite database path |
 | `--search-log` | — | Path to a JSONL file logging every search query and result domains |
-| `--max-depth` | `3` | Maximum topic graph depth (root + N levels of sub-topics) |
+| `--max-depth` | `3` | Number of decomposition levels below the root (root + N sub-topic tiers). Increase this when research finishes before `--duration` ends — each extra level adds significantly more nodes and research time. |
 | **Budget controls** | | |
 | `--max-queries` | unlimited | Maximum Tavily API calls per session |
 | `--max-nodes` | unlimited | Maximum topic-graph nodes to create |

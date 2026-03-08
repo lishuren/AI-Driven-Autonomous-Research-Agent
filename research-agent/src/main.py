@@ -508,10 +508,12 @@ async def run(
 
         manager.generate_report()  # Update report with graph outline
 
-        deadline_logged = False
         budget_logged = False
         while True:
-            past_deadline = time.monotonic() >= end_time
+            # Hard deadline: stop before starting new work when time is up
+            if time.monotonic() >= end_time:
+                logger.info("Duration reached — stopping research and generating report.")
+                break
 
             # Graceful stop when budget is exhausted
             if manager.budget.is_exhausted() and not budget_logged:
@@ -543,40 +545,32 @@ async def run(
                     await asyncio.sleep(_ERROR_SLEEP_SECONDS)
                     continue
             else:
-                # Both graph and queue exhausted — we're done regardless of time
-                logger.info("All research work complete.")
+                # Both graph and queue exhausted before the deadline
+                remaining_min = (end_time - time.monotonic()) / 60
+                logger.info(
+                    "All research work complete (%.0f min remaining in session). "
+                    "For deeper research re-run with --max-depth %d (current: %d).",
+                    remaining_min,
+                    manager._max_depth + 1,
+                    manager._max_depth,
+                )
                 break
 
             if finding:
                 approved_count += 1
                 remaining = end_time - time.monotonic()
-                if remaining > 0:
-                    logger.info(
-                        "Approved finding #%d: %r  (%.0f min remaining)",
-                        approved_count,
-                        finding["subtopic"],
-                        remaining / 60,
-                    )
-                else:
-                    logger.info(
-                        "Approved finding #%d: %r  (deadline passed — press Ctrl+C to stop)",
-                        approved_count,
-                        finding["subtopic"],
-                    )
+                logger.info(
+                    "Approved finding #%d: %r  (%.0f min remaining)",
+                    approved_count,
+                    finding["subtopic"],
+                    max(0.0, remaining / 60),
+                )
 
             # Progressive report save after every cycle (not just on approved findings)
             try:
                 manager.generate_report()
             except Exception as report_exc:
                 logger.warning("Progressive report save failed: %s", report_exc)
-
-            # Log once when we pass the deadline but keep going
-            if past_deadline and not deadline_logged:
-                logger.info(
-                    "Specified duration reached but research is still in progress. "
-                    "Continuing until complete — press Ctrl+C to stop now."
-                )
-                deadline_logged = True
 
             cycles_completed += 1
 

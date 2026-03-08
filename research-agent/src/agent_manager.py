@@ -515,7 +515,7 @@ class AgentManager:
                 "Rejected %r (attempt %d/%d). Missing: %s",
                 node.name, reject_count + 1, _MAX_REJECT_RETRIES, missing,
             )
-            refined_task = await self._planner.refine(node.name, missing)
+            refined_task = await self._planner.refine(node.name, missing, main_topic=self._title)
             task = refined_task
             reject_count += 1
 
@@ -711,7 +711,7 @@ class AgentManager:
                 _MAX_REJECT_RETRIES,
                 missing,
             )
-            refined_task = await self._planner.refine(task["subtopic"], missing)
+            refined_task = await self._planner.refine(task["subtopic"], missing, main_topic=self._title)
             task = refined_task
             reject_count += 1
 
