@@ -22,7 +22,7 @@ from src.tools.search_tool import SearchTool, _detect_language
 
 logger = logging.getLogger(__name__)
 
-_SUMMARISE_PROMPT_FILE = "researcher_summarise.txt"
+_SUMMARISE_PROMPT_FILE = "researcher_summarise.md"
 
 _SCRAPE_TOP_N = 4
 _MIN_RAW_CONTENT_CHARS = 500  # threshold for "sufficient" Tavily raw_content

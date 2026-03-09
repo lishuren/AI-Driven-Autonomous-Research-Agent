@@ -240,8 +240,8 @@ cp -R research-agent/prompts /tmp/my-prompts
 python -m src.main --topic "AI Safety" --prompt-dir /tmp/my-prompts
 ```
 
-Only the files you override need to exist in your custom directory; missing
-files fall back to the bundled defaults.
+Only the `.md` prompt files you override need to exist in your custom
+directory; missing files fall back to the bundled defaults.
 
 ## Output Format
 

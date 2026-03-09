@@ -41,13 +41,13 @@ def _contains_cjk(text: str) -> bool:
             return True
     return False
 
-_DECOMPOSE_PROMPT_FILE = "planner_decompose.txt"
-_RETROSPECTIVE_PROMPT_FILE = "planner_retrospective.txt"
-_FOLLOWUP_PROMPT_FILE = "planner_followup.txt"
-_ANALYZE_PROMPT_FILE = "planner_analyze.txt"
-_HIERARCHICAL_DECOMPOSE_PROMPT_FILE = "planner_hierarchical_decompose.txt"
-_CONSOLIDATION_PROMPT_FILE = "planner_consolidate.txt"
-_RESTRUCTURE_PROMPT_FILE = "planner_restructure.txt"
+_DECOMPOSE_PROMPT_FILE = "planner_decompose.md"
+_RETROSPECTIVE_PROMPT_FILE = "planner_retrospective.md"
+_FOLLOWUP_PROMPT_FILE = "planner_followup.md"
+_ANALYZE_PROMPT_FILE = "planner_analyze.md"
+_HIERARCHICAL_DECOMPOSE_PROMPT_FILE = "planner_hierarchical_decompose.md"
+_CONSOLIDATION_PROMPT_FILE = "planner_consolidate.md"
+_RESTRUCTURE_PROMPT_FILE = "planner_restructure.md"
 
 
 _STOPWORDS = {

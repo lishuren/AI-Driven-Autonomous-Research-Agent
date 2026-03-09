@@ -189,8 +189,8 @@ cp -R prompts /tmp/my-prompts
 python -m src.main --topic "Stock Trading Strategies" --prompt-dir /tmp/my-prompts
 ```
 
-Only the prompt files you override need to exist in your custom directory; the
-rest fall back to the bundled defaults.
+Only the `.md` prompt files you override need to exist in your custom
+directory; the rest fall back to the bundled defaults.
 
 ### Requirements file format
 

@@ -175,7 +175,7 @@ class TestPlannerAgent:
     def test_custom_prompt_dir_overrides_planner_prompt(self, event_loop, tmp_path):
         from src.agents.planner import PlannerAgent
 
-        custom_prompt = tmp_path / "planner_decompose.txt"
+        custom_prompt = tmp_path / "planner_decompose.md"
         custom_prompt.write_text(
             'CUSTOM PLANNER PROMPT\nTopic: {topic}\nAlready researched: {known_topics}\n'
             '{vocab_section}\n{feedback_section}\n[]',

@@ -19,7 +19,7 @@ from src.prompt_loader import load_prompt
 
 logger = logging.getLogger(__name__)
 
-_CRITIC_PROMPT_FILE = "critic_review.txt"
+_CRITIC_PROMPT_FILE = "critic_review.md"
 
 _HEURISTIC_FORMULA_PATTERNS = [
     r"\$\$.*?\$\$",        # LaTeX display math
