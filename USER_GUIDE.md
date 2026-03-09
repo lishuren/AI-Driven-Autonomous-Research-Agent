@@ -160,6 +160,13 @@ You can also use a requirements file instead of inline topic text:
 python -m src.main --requirements-file requirements.md --duration 30m --model qwen2.5:7b
 ```
 
+Or pass a **topic directory** — the recommended approach for any complex,
+multi-session research project (see the next section):
+
+```bash
+python -m src.main --topic-dir ./my-research/ --duration 2h --model qwen2.5:7b
+```
+
 Or run against SiliconFlow:
 
 ```bash
@@ -171,13 +178,85 @@ python -m src.main --topic "Stock Trading Strategies" --duration 10m \
 ```
 
 Important:
-- Use exactly one of `--topic` or `--requirements-file`.
+- Use exactly one of `--topic`, `--requirements-file`, or `--topic-dir`.
 - Default Ollama URL is `http://localhost:11434`.
 - SiliconFlow uses `https://api.siliconflow.cn/v1`.
 - The CLI default request is `--model qwen2.5:7b`.
 - If the requested model is not installed, the app automatically falls back to a local installed model and logs a warning.
 - To avoid accidental model changes between runs, pass `--model` explicitly.
 - To use a custom data directory, specify `--data-dir /your/path` (reports go to `/your/path/reports` and db to `/your/path/research.db`).
+
+### Using a topic directory
+
+A topic directory bundles the research specification, optional custom prompts,
+and all output into a single self-contained folder:
+
+```
+my-research/
+├── requirements.md      ← research specification (topic.md also accepted)
+├── prompts/             ← optional: override any bundled prompt template
+└── output/              ← auto-created by the agent on first run
+    ├── reports/
+    ├── research.db
+    ├── task.json        ← progress checkpoint (enables crash recovery)
+    └── search.jsonl
+```
+
+**Topic file lookup order** (first match wins):
+1. `requirements.md`
+2. `topic.md`
+3. First `.md` file found alphabetically
+4. Folder name used as the topic if no `.md` file exists
+
+Example `requirements.md`:
+
+```markdown
+## Topic
+Quantum Computing Algorithms
+
+## Research Detail
+Focus on Shor's algorithm and its practical implications for cryptography.
+```
+
+Run it:
+
+```bash
+python -m src.main --topic-dir ./my-research/ --duration 2h
+```
+
+If a `prompts/` sub-folder exists in the directory it is automatically wired as
+`--prompt-dir`.  An explicit `--prompt-dir` on the CLI always takes precedence.
+
+### Crash recovery with task.json
+
+Every time a research node completes, the agent writes a `task.json` checkpoint
+into the output directory.  If the run is interrupted — API quota exhausted,
+network lost, power off — simply re-run the **exact same command**:
+
+```bash
+# First run (may be interrupted)
+python -m src.main --topic-dir ./my-research/ --duration 2h
+
+# Re-run after fix — resumes automatically from the last checkpoint
+python -m src.main --topic-dir ./my-research/ --duration 2h
+```
+
+What happens on resume:
+- The full topic graph and all approved findings are restored from `task.json`.
+- Nodes that were mid-research (`researching` or `analyzing`) are reset to
+  `pending` and retried from scratch.
+- The graph-build phase is skipped — research continues from the saved depth.
+
+The checkpoint status is set to `"completed"` once the graph is fully
+consolidated.  Re-running a completed session simply regenerates the report
+without performing new searches.
+
+`task.json` is also enabled when using `--data-dir`:
+
+```bash
+# task.json lives at /my/data/task.json
+python -m src.main --topic "AI Safety" --data-dir /my/data --duration 3h
+```
 
 ### Customising prompt templates
 
@@ -366,7 +445,10 @@ If you want to use a different base directory, use `--data-dir`:
 python -m src.main --topic "Stock Trading Strategies" --duration 10m --model qwen2.5:7b --data-dir /my/custom/data
 ```
 
-This will store reports in `/my/custom/data/reports/` and the database in `/my/custom/data/research.db`.
+This will store reports in `/my/custom/data/reports/`, the database in
+`/my/custom/data/research.db`, and a `task.json` progress checkpoint in
+`/my/custom/data/task.json`.  Re-running the same command after an interruption
+will resume from the checkpoint automatically.
 
 You can also override individual paths if needed:
 
@@ -382,17 +464,35 @@ python -m src.main --topic "Reinforcement Learning" --duration 10m --reports-dir
 
 Reports are written to:
 
-```text
-data/reports/
-```
+- **Default:** `data/reports/`
+- **With `--data-dir`:** `<data-dir>/reports/`
+- **With `--topic-dir`:** `<folder>/output/reports/`
 
 Example:
 
 ```bash
 ls data/reports
+# or, for a topic directory:
+ls my-research/output/reports
 ```
 
 The report filename is a sanitized version of the topic or requirements filename stem.
+
+### Inline source reference links
+
+Every finding section in the report includes **clickable inline source links**
+directly after the summary text:
+
+```markdown
+### NLP Overview
+
+Natural language processing covers tokenization, parsing, and semantics…
+
+*Sources: [1](https://arxiv.org/abs/1706.03762), [2](https://huggingface.co/docs)*
+```
+
+A global `## Sources` list at the end of the report lists all URLs for a
+complete overview.
 
 ## 10. Common issues
 
