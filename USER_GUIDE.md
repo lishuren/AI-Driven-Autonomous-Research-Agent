@@ -1,6 +1,8 @@
 # User Guide: Checkout to First Query
 
-This guide walks you from a fresh checkout to running your first research query with a local Ollama model.
+This guide walks you from a fresh checkout to running your first research query
+with either a local Ollama model or an online OpenAI-compatible provider such as
+SiliconFlow.
 
 ## 1. Checkout the code
 
@@ -29,7 +31,14 @@ Notes:
 python -m playwright install --with-deps chromium
 ```
 
-## 3. Install Ollama (Linux)
+## 3. Choose an LLM provider
+
+You can run the agent with either:
+
+- **Ollama** — local models on your machine
+- **SiliconFlow / other OpenAI-compatible APIs** — online hosted models
+
+### Option A: Install Ollama (Linux)
 
 ```bash
 curl -fsSL https://ollama.com/install.sh | sh
@@ -69,6 +78,25 @@ Optional sanity check against Ollama directly:
 
 ```bash
 ollama run qwen2.5:7b "In one sentence, explain RSI in trading."
+```
+
+### Option B: Use SiliconFlow instead of Ollama
+
+If you prefer an online model, export an API key and use SiliconFlow's
+OpenAI-compatible endpoint:
+
+```bash
+export SILICONFLOW_API_KEY="sk-..."
+```
+
+Example invocation:
+
+```bash
+python -m src.main --topic "Stock Trading Strategies" --duration 10m \
+  --llm-provider siliconflow \
+  --llm-url https://api.siliconflow.cn/v1 \
+  --llm-api-key "$SILICONFLOW_API_KEY" \
+  --model Qwen/Qwen2.5-7B-Instruct
 ```
 
 ## 6. Set up your Tavily API key
@@ -132,13 +160,56 @@ You can also use a requirements file instead of inline topic text:
 python -m src.main --requirements-file requirements.md --duration 30m --model qwen2.5:7b
 ```
 
+Or run against SiliconFlow:
+
+```bash
+python -m src.main --topic "Stock Trading Strategies" --duration 10m \
+  --llm-provider siliconflow \
+  --llm-url https://api.siliconflow.cn/v1 \
+  --llm-api-key "$SILICONFLOW_API_KEY" \
+  --model Qwen/Qwen2.5-7B-Instruct
+```
+
 Important:
 - Use exactly one of `--topic` or `--requirements-file`.
 - Default Ollama URL is `http://localhost:11434`.
+- SiliconFlow uses `https://api.siliconflow.cn/v1`.
 - The CLI default request is `--model qwen2.5:7b`.
 - If the requested model is not installed, the app automatically falls back to a local installed model and logs a warning.
 - To avoid accidental model changes between runs, pass `--model` explicitly.
 - To use a custom data directory, specify `--data-dir /your/path` (reports go to `/your/path/reports` and db to `/your/path/research.db`).
+
+### Customising prompt templates
+
+The planner, researcher, and critic prompts are now stored in
+`research-agent/prompts/`. To customise them without editing Python code:
+
+```bash
+cp -R prompts /tmp/my-prompts
+python -m src.main --topic "Stock Trading Strategies" --prompt-dir /tmp/my-prompts
+```
+
+Only the `.md` prompt files you override need to exist in your custom
+directory; the rest fall back to the bundled defaults.
+
+### Requirements file format
+
+Requirements files no longer need to contain prompt templates. They only need
+the research topic and any supporting requirements or output expectations.
+
+Example:
+
+```markdown
+## Topic
+Stock Trading Strategies
+
+## Research Detail
+Focus on RSI-based strategies and their known pitfalls.
+
+## Output Expectations
+- Explain the RSI formula
+- Include Python examples
+```
 
 ### Duration and depth
 
@@ -191,7 +262,7 @@ Example output:
 ==============================================================
 ```
 
-This only uses LLM (Ollama) calls.  No Tavily credits are consumed.
+This only uses LLM calls. No Tavily credits are consumed.
 
 ## Budget controls
 
@@ -255,6 +326,16 @@ ollama list
 
 ```bash
 python -m src.main --topic "Stock Trading Strategies" --duration 10m --model qwen2.5:7b
+```
+
+For SiliconFlow / other online OpenAI-compatible providers:
+
+```bash
+python -m src.main --topic "Stock Trading Strategies" --duration 10m \
+  --llm-provider siliconflow \
+  --llm-url https://api.siliconflow.cn/v1 \
+  --llm-api-key "$SILICONFLOW_API_KEY" \
+  --model Qwen/Qwen2.5-7B-Instruct
 ```
 
 3. Quick comparison runs (same topic, different model):

@@ -87,6 +87,9 @@ class AgentManager:
         user_prompt: Optional[str] = None,
         model: str = "qwen2.5:7b",
         ollama_base_url: str = "http://localhost:11434",
+        llm_provider: str = "ollama",
+        llm_api_key: Optional[str] = None,
+        prompt_dir: Optional[str] = None,
         reports_dir: str = "data/reports",
         db_path: str = "data/research.db",
         max_depth: int = MAX_DEPTH,
@@ -119,14 +122,23 @@ class AgentManager:
             ollama_base_url=ollama_base_url,
             search_tool=_search_tool,
             user_prompt=user_prompt,
+            llm_provider=llm_provider,
+            llm_api_key=llm_api_key,
+            prompt_dir=prompt_dir,
         )
         self._researcher = ResearcherAgent(
             model=model, ollama_base_url=ollama_base_url,
             user_prompt=user_prompt,
+            llm_provider=llm_provider,
+            llm_api_key=llm_api_key,
+            prompt_dir=prompt_dir,
         )
         self._critic = CriticAgent(
             model=model, ollama_base_url=ollama_base_url,
             user_prompt=user_prompt,
+            llm_provider=llm_provider,
+            llm_api_key=llm_api_key,
+            prompt_dir=prompt_dir,
         )
         self._kb = KnowledgeBase(db_path=db_path)
 

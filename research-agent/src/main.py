@@ -8,8 +8,8 @@ Usage:
 
 The ``--requirements-file`` option accepts a plain-text or Markdown file that
 contains the full research specification, including research details and output
-expectations.  This is the recommended approach for complex, multi-section
-requirements that are too long to fit comfortably on the command line.
+expectations. Prompt templates are loaded separately from prompt files, so the
+requirements file only needs to describe the research task itself.
 
 The controller implements a robust asyncio event loop that:
 - Runs for the specified duration (default 8 hours).
@@ -33,6 +33,8 @@ import time
 import urllib.request
 from pathlib import Path
 from typing import Optional
+
+from src.llm_client import default_base_url, normalize_provider
 
 
 def _load_dotenv(env_path: Optional[Path] = None) -> None:
@@ -201,14 +203,47 @@ def _parse_args() -> argparse.Namespace:
         "--model",
         type=str,
         default="qwen2.5:7b",
-        help="Requested Ollama model name (default: qwen2.5:7b). "
-             "If unavailable locally, runtime falls back to an installed model.",
+        help="Model name for the selected LLM provider (default: qwen2.5:7b). "
+             "For Ollama, runtime falls back to an installed local model if needed.",
+    )
+    parser.add_argument(
+        "--llm-provider",
+        type=str,
+        default=None,
+        choices=["ollama", "openai", "siliconflow"],
+        help="LLM provider to use. 'ollama' uses a local Ollama server. "
+             "'openai' and 'siliconflow' use an OpenAI-compatible online API. "
+             "Env: RESEARCH_LLM_PROVIDER (default: ollama).",
+    )
+    parser.add_argument(
+        "--llm-url",
+        type=str,
+        default=None,
+        help="Base URL for the selected LLM provider. For example, "
+             "https://api.siliconflow.cn/v1 for SiliconFlow. "
+             "Env: RESEARCH_LLM_URL.",
+    )
+    parser.add_argument(
+        "--llm-api-key",
+        type=str,
+        default=None,
+        metavar="KEY",
+        help="API key for OpenAI-compatible online providers. "
+             "Env: RESEARCH_LLM_API_KEY or SILICONFLOW_API_KEY.",
     )
     parser.add_argument(
         "--ollama-url",
         type=str,
         default="http://localhost:11434",
-        help="Ollama base URL (default: http://localhost:11434).",
+        help="Ollama base URL (default: http://localhost:11434). "
+             "Used when --llm-provider=ollama.",
+    )
+    parser.add_argument(
+        "--prompt-dir",
+        type=str,
+        default=None,
+        help="Optional directory containing prompt template files that override "
+             "the bundled defaults. Env: RESEARCH_PROMPT_DIR.",
     )
     parser.add_argument(
         "--data-dir",
@@ -328,16 +363,17 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _parse_requirements_file(path: Path) -> tuple[str, str, Optional[str]]:
-    """Parse a requirements file and extract topic, title, and optional user prompt.
+    """Parse a requirements file and extract topic, title, and optional context.
 
     Supports section markers:
-    - ``## Prompt`` — Text between this heading and the next ``##`` heading is
-      extracted as the user prompt (injected into all LLM calls).
     - ``## Topic`` — Text after this heading becomes the research topic.
+    - ``## Prompt`` — Ignored for backward compatibility; prompt templates now
+      live in separate prompt files.
     - If no section markers are found, the entire file content is used as the
       topic (backward compatible).
 
-    Returns ``(topic, title, user_prompt)``.
+    Returns ``(topic, title, user_prompt)`` where *user_prompt* contains
+    additional research context from the requirements file when available.
     """
     raw = path.read_text(encoding="utf-8").strip()
     title = path.stem
@@ -366,10 +402,16 @@ def _parse_requirements_file(path: Path) -> tuple[str, str, Optional[str]]:
     if current_section is not None:
         sections[current_section] = "\n".join(current_lines).strip()
 
-    user_prompt: Optional[str] = sections.get("prompt") or None
+    user_prompt: Optional[str] = None
 
     if "topic" in sections:
         topic = sections["topic"]
+        context_parts: list[str] = []
+        for key, val in sections.items():
+            if key not in {"topic", "prompt"} and val:
+                context_parts.append(val)
+        context = "\n\n".join(context_parts)
+        user_prompt = context or None
     elif sections:
         # Has section markers but no ## Topic — use non-section text + all
         # non-prompt sections as topic
@@ -406,6 +448,9 @@ async def run(
     user_prompt: Optional[str] = None,
     model: str = "qwen2.5:7b",
     ollama_base_url: str = "http://localhost:11434",
+    llm_provider: str = "ollama",
+    llm_api_key: Optional[str] = None,
+    prompt_dir: Optional[str] = None,
     reports_dir: str = "data/reports",
     db_path: str = "data/research.db",
     max_depth: int = 2,
@@ -414,37 +459,52 @@ async def run(
     max_credits: Optional[float] = None,
     warn_threshold: float = 0.80,
 ) -> None:
-    """Main async loop – runs for *duration_seconds* seconds."""
+    """Main async loop – runs for *duration_seconds* seconds.
+
+    Additional LLM-related parameters:
+    - ``llm_provider`` selects Ollama or an OpenAI-compatible backend.
+    - ``llm_api_key`` is used for online providers.
+    - ``prompt_dir`` overrides bundled prompt templates when provided.
+    """
     start_time = time.monotonic()
     end_time = start_time + duration_seconds
     cycles_completed = 0
     approved_count = 0
+    llm_provider = normalize_provider(llm_provider)
 
     resolved_model = model
-    try:
-        available_models = _list_ollama_models(ollama_base_url)
-        if available_models:
-            selected_model = _resolve_model_name(model, available_models)
-            if selected_model != model:
+    if llm_provider == "ollama":
+        try:
+            available_models = _list_ollama_models(ollama_base_url)
+            if available_models:
+                selected_model = _resolve_model_name(model, available_models)
+                if selected_model != model:
+                    logger.warning(
+                        "Requested Ollama model %r not found; using %r. "
+                        "Pull it with: ollama pull %s",
+                        model,
+                        selected_model,
+                        model,
+                    )
+                resolved_model = selected_model
+            else:
                 logger.warning(
-                    "Requested Ollama model %r not found; using %r. "
-                    "Pull it with: ollama pull %s",
-                    model,
-                    selected_model,
+                    "No local Ollama models found at %s. Pull one with: ollama pull %s",
+                    ollama_base_url,
                     model,
                 )
-            resolved_model = selected_model
-        else:
+        except Exception as exc:
             logger.warning(
-                "No local Ollama models found at %s. Pull one with: ollama pull %s",
+                "Could not query Ollama models at %s: %s. Continuing with model %r.",
                 ollama_base_url,
+                exc,
                 model,
             )
-    except Exception as exc:
-        logger.warning(
-            "Could not query Ollama models at %s: %s. Continuing with model %r.",
+    else:
+        logger.info(
+            "Using %s-compatible LLM provider at %s with model %r.",
+            llm_provider,
             ollama_base_url,
-            exc,
             model,
         )
 
@@ -454,6 +514,9 @@ async def run(
         user_prompt=user_prompt,
         model=resolved_model,
         ollama_base_url=ollama_base_url,
+        llm_provider=llm_provider,
+        llm_api_key=llm_api_key,
+        prompt_dir=prompt_dir,
         reports_dir=reports_dir,
         db_path=db_path,
         max_depth=max_depth,
@@ -601,6 +664,9 @@ async def estimate_run(
     user_prompt: Optional[str] = None,
     model: str = "qwen2.5:7b",
     ollama_base_url: str = "http://localhost:11434",
+    llm_provider: str = "ollama",
+    llm_api_key: Optional[str] = None,
+    prompt_dir: Optional[str] = None,
     max_depth: int = 2,
 ) -> None:
     """Build the topic graph without searches and print a credit cost estimate.
@@ -608,6 +674,9 @@ async def estimate_run(
     Uses LLM decomposition (Ollama) only — all Tavily API calls are suppressed.
     The graph structure determines how many leaf nodes need to be researched,
     which gives the estimated search credit cost.
+
+    ``llm_provider``, ``llm_api_key``, and ``prompt_dir`` mirror ``run()`` so
+    dry-run estimation uses the same provider and prompt configuration.
 
     Credit estimates:
     - **Conservative**: 1 credit per leaf (1 search, no extract, first-try success)
@@ -622,13 +691,15 @@ async def estimate_run(
     # Fetch Tavily account quota before suppressing calls (best-effort).
     account_credits = await fetch_account_credits()
 
+    llm_provider = normalize_provider(llm_provider)
     resolved_model = model
-    try:
-        available_models = _list_ollama_models(ollama_base_url)
-        if available_models:
-            resolved_model = _resolve_model_name(model, available_models)
-    except Exception:
-        pass  # proceed with requested model name; connection failure tolerated
+    if llm_provider == "ollama":
+        try:
+            available_models = _list_ollama_models(ollama_base_url)
+            if available_models:
+                resolved_model = _resolve_model_name(model, available_models)
+        except Exception:
+            pass  # proceed with requested model name; connection failure tolerated
 
     dry_run_dir = tempfile.mkdtemp(prefix="research-dry-run-")
     manager = AgentManager(
@@ -637,6 +708,9 @@ async def estimate_run(
         user_prompt=user_prompt,
         model=resolved_model,
         ollama_base_url=ollama_base_url,
+        llm_provider=llm_provider,
+        llm_api_key=llm_api_key,
+        prompt_dir=prompt_dir,
         reports_dir=dry_run_dir,
         db_path=":memory:",
         max_depth=max_depth,
@@ -740,6 +814,34 @@ def main() -> None:
     else:
         duration = _DEFAULT_HOURS * 3600
 
+    def _str_env(name: str) -> Optional[str]:
+        val = os.environ.get(name, "").strip()
+        return val or None
+
+    llm_provider = normalize_provider(
+        args.llm_provider or _str_env("RESEARCH_LLM_PROVIDER") or "ollama"
+    )
+    llm_api_key = (
+        args.llm_api_key
+        or _str_env("RESEARCH_LLM_API_KEY")
+        or _str_env("SILICONFLOW_API_KEY")
+    )
+    prompt_dir = args.prompt_dir or _str_env("RESEARCH_PROMPT_DIR")
+    llm_url = (
+        args.llm_url
+        or _str_env("RESEARCH_LLM_URL")
+        or (
+            args.ollama_url
+            if llm_provider == "ollama"
+            else default_base_url(llm_provider)
+        )
+    )
+    if llm_provider != "ollama" and not llm_api_key:
+        sys.exit(
+            "An API key is required for online LLM providers. "
+            "Use --llm-api-key or set RESEARCH_LLM_API_KEY / SILICONFLOW_API_KEY."
+        )
+
     # Resolve topic, title, and optional user prompt
     user_prompt: Optional[str] = None
     if args.requirements_file is not None:
@@ -805,7 +907,10 @@ def main() -> None:
                     title=report_title,
                     user_prompt=user_prompt,
                     model=args.model,
-                    ollama_base_url=args.ollama_url,
+                    ollama_base_url=llm_url,
+                    llm_provider=llm_provider,
+                    llm_api_key=llm_api_key,
+                    prompt_dir=prompt_dir,
                     max_depth=max_depth,
                 )
             )
@@ -841,7 +946,10 @@ def main() -> None:
                 user_prompt=user_prompt,
                 duration_seconds=duration,
                 model=args.model,
-                ollama_base_url=args.ollama_url,
+                ollama_base_url=llm_url,
+                llm_provider=llm_provider,
+                llm_api_key=llm_api_key,
+                prompt_dir=prompt_dir,
                 reports_dir=reports_dir,
                 db_path=db_path,
                 max_depth=max_depth,

@@ -14,12 +14,13 @@ import asyncio
 import json
 import logging
 import re
-import urllib.error
-import urllib.request
 from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
     from src.tools.search_tool import SearchTool
+
+from src.llm_client import generate_text
+from src.prompt_loader import load_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -40,191 +41,13 @@ def _contains_cjk(text: str) -> bool:
             return True
     return False
 
-_DECOMPOSE_PROMPT = """You are a search query generator. Convert a topic into 5 search queries.
-
-Rules:
-- Each query must use ONLY words already present in the topic, plus these search helpers if needed:
-  season, episode, cast, plot, summary, review, release, explained, how, why, list, vs,
-  history, tutorial, formula, algorithm, code, example, install, python, wiki, imdb, rating
-- DO NOT invent new words or concepts not found in the topic.
-- DO NOT add adjectives or qualifiers the user did not write.
-- Queries must be 2-6 words maximum.
-
-Examples:
-  Topic "Westworld TV Series S3 and S4"  →  "Westworld season 3 plot", "Westworld season 4 cast"
-  Topic "RSI trading indicator"          →  "RSI indicator formula", "RSI trading python"
-  Topic "React framework hooks"          →  "React hooks tutorial", "React framework example"
-
-Topic: {topic}
-Already researched: {known_topics}
-{vocab_section}
-{feedback_section}
-Respond ONLY with valid JSON, no other text:
-[
-  {{"subtopic": "<short name>", "query": "<2-6 word query>"}},
-  {{"subtopic": "<short name>", "query": "<2-6 word query>"}},
-  {{"subtopic": "<short name>", "query": "<2-6 word query>"}},
-  {{"subtopic": "<short name>", "query": "<2-6 word query>"}},
-  {{"subtopic": "<short name>", "query": "<2-6 word query>"}}
-]
-"""
-
-_RETROSPECTIVE_PROMPT = """You are a search query generator. The research agent is STUCK — all previous queries for this topic failed to produce useful results.
-
-Your task: Generate 5 completely DIFFERENT search queries that approach the topic from a fresh angle.
-
-Topic: {topic}
-Failed queries so far: {failed_queries}
-
-Rules:
-- Each query must use ONLY words already present in the topic, plus these helpers if needed:
-  season, episode, cast, plot, summary, review, release, explained, how, why, list, vs,
-  history, tutorial, formula, algorithm, code, example, install, python, wiki, imdb
-- Queries must be 2-6 words maximum.
-- Every query MUST be different from the failed ones above.
-
-Respond ONLY with valid JSON, no other text:
-[
-  {{"subtopic": "<short name>", "query": "<2-6 word query>"}},
-  {{"subtopic": "<short name>", "query": "<2-6 word query>"}},
-  {{"subtopic": "<short name>", "query": "<2-6 word query>"}},
-  {{"subtopic": "<short name>", "query": "<2-6 word query>"}},
-  {{"subtopic": "<short name>", "query": "<2-6 word query>"}}
-]
-"""
-
-_FOLLOWUP_PROMPT = """You are a search query generator.
-
-The previous research on a sub-topic had gaps. Generate ONE targeted follow-up search query.
-
-Main research topic: {main_topic}
-Sub-topic being researched: {topic}
-Gaps identified: {gaps}
-{user_context}
-Rules:
-- The query MUST stay relevant to the main research topic and sub-topic.
-- Be specific: include the sub-topic name or a key term from it, plus a term from the gaps.
-- Keep the query to 3-8 words. No abstract nouns. No embellishments.
-
-Respond ONLY with valid JSON:
-{{"subtopic": "{topic} (follow-up)", "query": "<3-8 word query>"}}
-"""
-
-_ANALYZE_PROMPT = """You are a research topic analyzer.
-
-Given a topic and an optional initial summary, decide whether this topic:
-- Can be researched DIRECTLY with a few simple web searches ("leaf" topic), OR
-- Is COMPLEX and should be broken into smaller sub-topics for thorough research.
-
-Also assess the RELEVANCE of this topic to the main research question.
-
-Examples of LEAF topics: "RSI indicator formula", "Python asyncio tutorial", "GraphRAG installation guide"
-Examples of COMPLEX topics: "Design a World Extraction Service", "Stock Trading Strategies", "Build a recommendation engine"
-
-Topic: {topic}
-Main research question: {main_topic}
-{description_section}
-{summary_section}
-{user_context}
-Respond ONLY with valid JSON:
-{{"is_leaf": true | false, "relevance": "high" | "medium" | "low", "reasoning": "<one sentence explanation>"}}
-"""
-
-_HIERARCHICAL_DECOMPOSE_PROMPT = """You are a research planner that breaks a complex topic into sub-topics.
-
-Topic: {topic}
-Main research question: {main_topic}
-{description_section}
-{user_context}
-Already known sub-topics (do NOT repeat these): {known_subtopics}
-{vocab_section}
-
-Rules:
-- Generate {max_children} sub-topics that together cover the main topic comprehensively.
-- Every sub-topic MUST directly serve the main research question. Do NOT generate tangential or loosely related sub-topics.
-- Sub-topics must be non-overlapping and specific.
-- Each sub-topic needs a short name, a 2-6 word search query, a priority (1-10, higher = more important), and a one-sentence description.
-- DO NOT invent abstract or vague sub-topics. Be concrete.
-- Search queries must use real words from the topic.
-- Queries MUST be space-separated lowercase words (e.g. "tech provider integration"). NO CamelCase, NO PascalCase, NO underscores.
-- For Chinese/Japanese/Korean topics: every search query MUST include 1-2 domain-specific keywords from the main topic so that it is specific enough for a search engine. Do NOT produce bare generic phrases like "用户数量" alone — write "中国TRPG用户数量" or "在线TRPG付费用户" instead.
-
-Respond ONLY with valid JSON:
-[
-  {{"name": "<short name>", "query": "<2-6 word query>", "priority": <1-10>, "description": "<one sentence>"}},
-  ...
-]
-"""
-
-_CONSOLIDATION_PROMPT = """You are a research consolidator. Synthesize multiple research findings into a unified summary.
-
-Parent topic: {parent_topic}
-{user_context}
-
-Child research findings:
-{child_summaries}
-
-Write a comprehensive consolidated summary (≤800 words) that:
-1. Integrates all child findings into a coherent narrative.
-2. Highlights connections and dependencies between sub-topics.
-3. Identifies any remaining gaps or contradictions.
-4. Provides a clear overall picture of the parent topic.
-
-Consolidated summary:"""
-
-_RESTRUCTURE_PROMPT = """You are a research planner reviewing a research graph that has gaps.
-
-Current research outline:
-{graph_outline}
-
-Identified gaps or issues:
-{gaps}
-{user_context}
-
-Suggest changes to improve coverage. You can:
-- Add new sub-topics under existing parents.
-- Note which areas need more depth.
-
-Respond ONLY with valid JSON:
-[
-  {{"action": "add", "parent_name": "<existing parent topic name>", "name": "<new sub-topic>", "query": "<2-6 word query>", "priority": <1-10>}},
-  ...
-]
-"""
-
-
-def _call_ollama(prompt: str, model: str, base_url: str) -> Optional[str]:
-    """Synchronous call to Ollama REST API; returns the response text."""
-    payload = json.dumps(
-        {"model": model, "prompt": prompt, "stream": False}
-    ).encode()
-    req = urllib.request.Request(
-        f"{base_url.rstrip('/')}/api/generate",
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            data = json.loads(resp.read())
-            return data.get("response", "")
-    except urllib.error.HTTPError as exc:
-        error_text = ""
-        try:
-            payload = json.loads(exc.read().decode("utf-8", errors="ignore"))
-            if isinstance(payload, dict):
-                error_text = str(payload.get("error", ""))
-        except Exception:
-            error_text = ""
-
-        if error_text:
-            logger.warning("Ollama call failed (%s): %s", exc.code, error_text)
-        else:
-            logger.warning("Ollama call failed (%s): %s", exc.code, exc.reason)
-        return None
-    except Exception as exc:
-        logger.warning("Ollama call failed: %s", exc)
-        return None
+_DECOMPOSE_PROMPT_FILE = "planner_decompose.md"
+_RETROSPECTIVE_PROMPT_FILE = "planner_retrospective.md"
+_FOLLOWUP_PROMPT_FILE = "planner_followup.md"
+_ANALYZE_PROMPT_FILE = "planner_analyze.md"
+_HIERARCHICAL_DECOMPOSE_PROMPT_FILE = "planner_hierarchical_decompose.md"
+_CONSOLIDATION_PROMPT_FILE = "planner_consolidate.md"
+_RESTRUCTURE_PROMPT_FILE = "planner_restructure.md"
 
 
 _STOPWORDS = {
@@ -243,11 +66,26 @@ class PlannerAgent:
         ollama_base_url: str = "http://localhost:11434",
         search_tool: Optional["SearchTool"] = None,
         user_prompt: Optional[str] = None,
+        llm_provider: str = "ollama",
+        llm_api_key: Optional[str] = None,
+        prompt_dir: Optional[str] = None,
     ) -> None:
         self.model = model
         self.ollama_base_url = ollama_base_url
         self._search_tool = search_tool
         self._user_prompt = user_prompt
+        self._llm_provider = llm_provider
+        self._llm_api_key = llm_api_key
+        self._decompose_prompt = load_prompt(_DECOMPOSE_PROMPT_FILE, prompt_dir)
+        self._retrospective_prompt = load_prompt(_RETROSPECTIVE_PROMPT_FILE, prompt_dir)
+        self._followup_prompt = load_prompt(_FOLLOWUP_PROMPT_FILE, prompt_dir)
+        self._analyze_prompt = load_prompt(_ANALYZE_PROMPT_FILE, prompt_dir)
+        self._hierarchical_decompose_prompt = load_prompt(
+            _HIERARCHICAL_DECOMPOSE_PROMPT_FILE,
+            prompt_dir,
+        )
+        self._consolidation_prompt = load_prompt(_CONSOLIDATION_PROMPT_FILE, prompt_dir)
+        self._restructure_prompt = load_prompt(_RESTRUCTURE_PROMPT_FILE, prompt_dir)
 
     @property
     def _user_context(self) -> str:
@@ -255,6 +93,17 @@ class PlannerAgent:
         if self._user_prompt:
             return f"User instructions:\n{self._user_prompt}\n"
         return ""
+
+    def _call_llm(self, prompt: str) -> Optional[str]:
+        """Synchronous LLM call used by planner operations."""
+        return generate_text(
+            prompt,
+            self.model,
+            self.ollama_base_url,
+            provider=self._llm_provider,
+            api_key=self._llm_api_key,
+            timeout=120,
+        )
 
     async def _pre_search_vocab(self, topic: str) -> list[str]:
         """Do a quick search for the topic and extract real vocabulary from results.
@@ -428,7 +277,7 @@ class PlannerAgent:
             feedback_parts.append(f"Queries that failed (avoid these patterns): {sample}")
         feedback_section = "\n".join(feedback_parts)
 
-        prompt = _DECOMPOSE_PROMPT.format(
+        prompt = self._decompose_prompt.format(
             topic=topic,
             known_topics=known,
             vocab_section=vocab_section,
@@ -436,9 +285,7 @@ class PlannerAgent:
         )
 
         loop = asyncio.get_event_loop()
-        raw = await loop.run_in_executor(
-            None, _call_ollama, prompt, self.model, self.ollama_base_url
-        )
+        raw = await loop.run_in_executor(None, self._call_llm, prompt)
 
         tasks = self._parse_json(raw)
         if isinstance(tasks, list) and tasks:
@@ -467,15 +314,13 @@ class PlannerAgent:
             "Retrospective re-plan for %r after %d failed queries.",
             topic, len(failed_queries),
         )
-        prompt = _RETROSPECTIVE_PROMPT.format(
+        prompt = self._retrospective_prompt.format(
             topic=topic,
             failed_queries=", ".join(failed_queries[-10:]) or "none",
         )
 
         loop = asyncio.get_event_loop()
-        raw = await loop.run_in_executor(
-            None, _call_ollama, prompt, self.model, self.ollama_base_url
-        )
+        raw = await loop.run_in_executor(None, self._call_llm, prompt)
 
         tasks = self._parse_json(raw)
         if isinstance(tasks, list) and tasks:
@@ -495,15 +340,13 @@ class PlannerAgent:
 
     async def refine(self, topic: str, gaps: str, main_topic: str = "") -> dict[str, str]:
         """Generate a targeted follow-up task to fill the identified *gaps*."""
-        prompt = _FOLLOWUP_PROMPT.format(
+        prompt = self._followup_prompt.format(
             topic=topic, gaps=gaps, main_topic=main_topic or topic,
             user_context=self._user_context,
         )
 
         loop = asyncio.get_event_loop()
-        raw = await loop.run_in_executor(
-            None, _call_ollama, prompt, self.model, self.ollama_base_url
-        )
+        raw = await loop.run_in_executor(None, self._call_llm, prompt)
 
         task = self._parse_json(raw)
         if isinstance(task, dict) and "query" in task:
@@ -534,7 +377,7 @@ class PlannerAgent:
         description_section = (
             f"Description: {description}\n" if description else ""
         )
-        prompt = _ANALYZE_PROMPT.format(
+        prompt = self._analyze_prompt.format(
             topic=topic,
             main_topic=main_topic or topic,
             summary_section=summary_section,
@@ -543,9 +386,7 @@ class PlannerAgent:
         )
 
         loop = asyncio.get_event_loop()
-        raw = await loop.run_in_executor(
-            None, _call_ollama, prompt, self.model, self.ollama_base_url
-        )
+        raw = await loop.run_in_executor(None, self._call_llm, prompt)
 
         result = self._parse_json(raw)
         if isinstance(result, dict) and "is_leaf" in result:
@@ -589,7 +430,7 @@ class PlannerAgent:
             if vocab else ""
         )
 
-        prompt = _HIERARCHICAL_DECOMPOSE_PROMPT.format(
+        prompt = self._hierarchical_decompose_prompt.format(
             topic=topic,
             main_topic=main_topic or topic,
             description_section=description_section,
@@ -600,9 +441,7 @@ class PlannerAgent:
         )
 
         loop = asyncio.get_event_loop()
-        raw = await loop.run_in_executor(
-            None, _call_ollama, prompt, self.model, self.ollama_base_url
-        )
+        raw = await loop.run_in_executor(None, self._call_llm, prompt)
 
         tasks = self._parse_json(raw)
         if isinstance(tasks, list) and tasks:
@@ -661,16 +500,14 @@ class PlannerAgent:
             parts.append(f"### {name}\n{summary}")
         child_text = "\n\n".join(parts)
 
-        prompt = _CONSOLIDATION_PROMPT.format(
+        prompt = self._consolidation_prompt.format(
             parent_topic=parent_topic,
             user_context=self._user_context,
             child_summaries=child_text[:10000],
         )
 
         loop = asyncio.get_event_loop()
-        raw = await loop.run_in_executor(
-            None, _call_ollama, prompt, self.model, self.ollama_base_url
-        )
+        raw = await loop.run_in_executor(None, self._call_llm, prompt)
 
         if raw and raw.strip():
             logger.info("Consolidated summary for %r: %d chars.", parent_topic, len(raw))
@@ -690,16 +527,14 @@ class PlannerAgent:
         Returns a list of dicts with keys: ``action``, ``parent_name``, ``name``,
         ``query``, ``priority``.
         """
-        prompt = _RESTRUCTURE_PROMPT.format(
+        prompt = self._restructure_prompt.format(
             graph_outline=graph_outline,
             gaps=gaps,
             user_context=self._user_context,
         )
 
         loop = asyncio.get_event_loop()
-        raw = await loop.run_in_executor(
-            None, _call_ollama, prompt, self.model, self.ollama_base_url
-        )
+        raw = await loop.run_in_executor(None, self._call_llm, prompt)
 
         result = self._parse_json(raw)
         if isinstance(result, list):

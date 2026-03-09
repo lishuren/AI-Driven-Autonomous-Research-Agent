@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 import pytest
 
-from src.main import _parse_duration
+from src.main import _parse_duration, _parse_requirements_file
 
 
 class TestParseDuration:
@@ -148,6 +148,37 @@ class TestRequirementsFile:
 
         assert args.requirements_file == str(req_file)
         assert args.topic is None
+
+    def test_parse_requirements_file_ignores_prompt_section(self, tmp_path):
+        req_file = tmp_path / "spec.md"
+        req_file.write_text(
+            "## Topic\nRSI trading\n\n"
+            "## Prompt\nThis should be ignored.\n\n"
+            "## Output Expectations\nNeed formulas and examples.\n",
+            encoding="utf-8",
+        )
+
+        topic, title, user_prompt = _parse_requirements_file(req_file)
+
+        assert topic == "RSI trading"
+        assert title == "spec"
+        assert user_prompt == "Need formulas and examples."
+
+    def test_parse_requirements_file_ignores_prompt_and_keeps_other_context(self, tmp_path):
+        req_file = tmp_path / "spec.md"
+        req_file.write_text(
+            "## Topic\nRSI trading\n\n"
+            "## Prompt\nIgnore this prompt block.\n\n"
+            "## Research Detail\nInvestigate the formula.\n\n"
+            "## Output Expectations\nNeed examples.\n",
+            encoding="utf-8",
+        )
+
+        topic, title, user_prompt = _parse_requirements_file(req_file)
+
+        assert topic == "RSI trading"
+        assert title == "spec"
+        assert user_prompt == "Investigate the formula.\n\nNeed examples."
 
 
 class TestMaxDepthArg:
@@ -363,6 +394,36 @@ class TestTavilyKeyArg:
         assert captured["title"] == "market-analysis"
         assert captured["user_prompt"] == spec_content
 
+    def test_main_requirements_file_topic_section_passes_remaining_context(self, tmp_path, monkeypatch):
+        req_file = tmp_path / "spec.md"
+        req_file.write_text(
+            "## Topic\nRSI trading\n\n"
+            "## Research Detail\nInvestigate the formula.\n\n"
+            "## Prompt\nOld inline prompt.\n",
+            encoding="utf-8",
+        )
+
+        captured: dict = {}
+
+        async def fake_run(topic, duration_seconds, title=None, user_prompt=None, **kwargs):
+            captured["topic"] = topic
+            captured["title"] = title
+            captured["user_prompt"] = user_prompt
+
+        monkeypatch.setattr("src.main.run", fake_run)
+        monkeypatch.setattr("src.main.Path.mkdir", lambda *a, **kw: None)
+
+        with patch(
+            "sys.argv",
+            ["prog", "--requirements-file", str(req_file), "--duration", "1s"],
+        ):
+            from src.main import main
+            main()
+
+        assert captured["topic"] == "RSI trading"
+        assert captured["title"] == "spec"
+        assert captured["user_prompt"] == "Investigate the formula."
+
     def test_main_missing_requirements_file_exits(self, tmp_path, monkeypatch):
         """main() should exit with an error if the file does not exist."""
         missing = tmp_path / "nonexistent.md"
@@ -526,6 +587,72 @@ class TestDryRunArgs:
         """Setting warn-credits to 1.0 effectively disables warnings."""
         args = self._parse(["--warn-credits", "1.0"])
         assert args.warn_credits == pytest.approx(1.0)
+
+
+class TestLLMArgs:
+    def _parse(self, extra_args: list[str]) -> argparse.Namespace:
+        from src.main import _parse_args
+
+        with patch("sys.argv", ["prog", "--topic", "Test"] + extra_args):
+            return _parse_args()
+
+    def test_llm_provider_default_none(self):
+        args = self._parse([])
+        assert args.llm_provider is None
+
+    def test_llm_provider_accepts_siliconflow(self):
+        args = self._parse(["--llm-provider", "siliconflow"])
+        assert args.llm_provider == "siliconflow"
+
+    def test_llm_url_stored(self):
+        args = self._parse(["--llm-url", "https://api.siliconflow.cn/v1"])
+        assert args.llm_url == "https://api.siliconflow.cn/v1"
+
+    def test_llm_api_key_stored(self):
+        args = self._parse(["--llm-api-key", "sk-test"])
+        assert args.llm_api_key == "sk-test"
+
+    def test_prompt_dir_stored(self):
+        args = self._parse(["--prompt-dir", "/tmp/prompts"])
+        assert args.prompt_dir == "/tmp/prompts"
+
+    def test_main_requires_api_key_for_online_provider(self):
+        with patch("sys.argv", ["prog", "--topic", "Test", "--llm-provider", "siliconflow"]):
+            from src.main import main
+            with pytest.raises(SystemExit):
+                main()
+
+    def test_main_passes_online_llm_and_prompt_dir_to_run(self, monkeypatch):
+        captured: dict = {}
+
+        async def fake_run(topic, duration_seconds, title=None, user_prompt=None, **kwargs):
+            captured["topic"] = topic
+            captured["duration_seconds"] = duration_seconds
+            captured["kwargs"] = kwargs
+
+        monkeypatch.setattr("src.main.run", fake_run)
+        monkeypatch.setattr("src.main.Path.mkdir", lambda *a, **kw: None)
+
+        with patch(
+            "sys.argv",
+            [
+                "prog",
+                "--topic", "RSI Strategy",
+                "--duration", "1s",
+                "--llm-provider", "siliconflow",
+                "--llm-url", "https://api.siliconflow.cn/v1",
+                "--llm-api-key", "sk-test",
+                "--prompt-dir", "/tmp/prompts",
+            ],
+        ):
+            from src.main import main
+            main()
+
+        assert captured["topic"] == "RSI Strategy"
+        assert captured["kwargs"]["ollama_base_url"] == "https://api.siliconflow.cn/v1"
+        assert captured["kwargs"]["llm_provider"] == "openai"
+        assert captured["kwargs"]["llm_api_key"] == "sk-test"
+        assert captured["kwargs"]["prompt_dir"] == "/tmp/prompts"
 
 
 class TestEstimateRun:
