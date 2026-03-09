@@ -11,13 +11,16 @@ Need a complete setup walkthrough from checkout to first query? See
 
 ```
 research-agent/
+├── prompts/                 # Customisable prompt templates
 ├── src/
 │   ├── main.py              # Entry point – async loop controller
 │   ├── agent_manager.py     # Orchestrates Planner / Researcher / Critic
+│   ├── llm_client.py        # Ollama + OpenAI-compatible LLM wrapper
+│   ├── prompt_loader.py     # Prompt template loader with override support
 │   ├── budget.py            # Per-session BudgetTracker (queries, nodes, credits)
 │   ├── topic_graph.py       # TopicNode / TopicGraph DAG for hierarchical research
 │   ├── agents/
-│   │   ├── planner.py       # Topic decomposition (Ollama)
+│   │   ├── planner.py       # Topic decomposition
 │   │   ├── researcher.py    # Search → Conditional Scrape → Summarise
 │   │   └── critic.py        # Quality auditor (PROCEED / REJECT)
 │   ├── tools/
@@ -51,8 +54,10 @@ vague summaries.
 ### 1. Prerequisites
 
 * Python 3.10+
-* [Ollama](https://ollama.ai/) running locally (`ollama serve`)
-* At least one downloaded model, e.g. `ollama pull qwen2.5:7b` or `ollama pull llama3`
+* Either:
+  * [Ollama](https://ollama.ai/) running locally (`ollama serve`), or
+  * an OpenAI-compatible online LLM endpoint such as [SiliconFlow](https://www.siliconflowcn.com/)
+* A model available from your chosen provider
 * **Tavily API key** — set `TAVILY_API_KEY` in your environment or pass `--tavily-key`. Sign up at [tavily.com](https://tavily.com) (free tier: 1,000 credits/month)
 
 To check your current credit balance and usage history at any time:
@@ -88,6 +93,13 @@ python -m src.main --requirements-file requirements.md --duration 1h30m
 # Explicit model selection (recommended)
 python -m src.main --topic "Reinforcement Learning" --duration 30m --model qwen2.5:7b
 
+# Use SiliconFlow (OpenAI-compatible online LLM)
+python -m src.main --topic "Reinforcement Learning" --duration 30m \
+  --llm-provider siliconflow \
+  --llm-url https://api.siliconflow.cn/v1 \
+  --llm-api-key "$SILICONFLOW_API_KEY" \
+  --model Qwen/Qwen2.5-7B-Instruct
+
 # Dry-run: build topic graph and estimate Tavily credit cost — no real searches
 python -m src.main --topic "Machine Learning" --dry-run
 # or equivalently:
@@ -102,6 +114,7 @@ Model resolution behavior:
 - If `--model` is missing (for example `qwen2.5:7b` is requested but not pulled),
   the app automatically falls back to an available local model and logs a warning.
 - To avoid ambiguity, pass `--model` explicitly.
+- For online providers, the requested model name is passed through unchanged.
 
 ### Model Guide
 
@@ -119,6 +132,17 @@ python -m src.main --topic "Reinforcement Learning" --duration 30m --model llama
 python -m src.main --topic "Reinforcement Learning" --duration 30m --model mistral
 ```
 
+Use an online OpenAI-compatible provider such as SiliconFlow:
+
+```bash
+export SILICONFLOW_API_KEY="sk-..."
+python -m src.main --topic "Reinforcement Learning" --duration 30m \
+  --llm-provider siliconflow \
+  --llm-url https://api.siliconflow.cn/v1 \
+  --llm-api-key "$SILICONFLOW_API_KEY" \
+  --model Qwen/Qwen2.5-7B-Instruct
+```
+
 Typical model differences:
 
 | Model | Typical strengths | Typical trade-offs | Good fit |
@@ -134,7 +158,9 @@ Notes:
 #### Requirements File Format
 
 For complex research tasks, create a plain-text or Markdown file that contains
-the full specification.  The file name stem (e.g. `requirements` for
+the full specification. Prompt templates now live in `research-agent/prompts/`
+or a custom `--prompt-dir`, so the requirements file only needs the research
+topic and supporting requirements. The file name stem (e.g. `requirements` for
 `requirements.md`) is used as the report title and output file name.
 
 ```markdown
@@ -159,8 +185,12 @@ back-testing methodology, and known pitfalls.
 | `--requirements-file` | *(required\*)* | Path to a file with the full research specification |
 | `--hours` | `8` | Hard time limit in hours. Research stops and the report is saved when the duration expires. |
 | `--duration` | — | Hard time limit in human-readable format (e.g. `10m`, `1h30m`, `90s`). Overrides `--hours`. Research stops and the report is saved when the duration expires. If research finishes before the deadline, the agent logs a suggestion to re-run with a higher `--max-depth`. |
-| `--model` | `qwen2.5:7b` | Requested Ollama model name. Falls back to any installed local model if unavailable. |
-| `--ollama-url` | `http://localhost:11434` | Ollama base URL |
+| `--model` | `qwen2.5:7b` | Model name for the selected LLM provider |
+| `--llm-provider` | `ollama` | LLM backend: `ollama`, `openai`, or `siliconflow` |
+| `--llm-url` | provider-specific | Base URL for the selected online/local LLM endpoint |
+| `--llm-api-key` | — | API key for OpenAI-compatible online providers |
+| `--ollama-url` | `http://localhost:11434` | Ollama base URL when `--llm-provider=ollama` |
+| `--prompt-dir` | bundled prompts | Directory containing prompt template overrides |
 | `--tavily-key` | *(env `TAVILY_API_KEY`)* | Tavily API key for web search |
 | `--data-dir` | — | Base data directory; overrides `--reports-dir`, `--db-path`, and `--search-log` defaults |
 | `--reports-dir` | `data/reports` | Output directory for Markdown reports |
@@ -189,11 +219,29 @@ Budget and scraping flags also read from environment variables when not passed o
 | CLI Flag | Environment Variable | Default |
 |----------|---------------------|---------|
 | `--tavily-key` | `TAVILY_API_KEY` | — |
+| `--llm-provider` | `RESEARCH_LLM_PROVIDER` | `ollama` |
+| `--llm-url` | `RESEARCH_LLM_URL` | provider-specific |
+| `--llm-api-key` | `RESEARCH_LLM_API_KEY` / `SILICONFLOW_API_KEY` | — |
+| `--prompt-dir` | `RESEARCH_PROMPT_DIR` | bundled prompts |
 | `--max-queries` | `RESEARCH_MAX_QUERIES` | unlimited |
 | `--max-nodes` | `RESEARCH_MAX_NODES` | unlimited |
 | `--max-credits-spend` | `RESEARCH_MAX_CREDITS` | unlimited |
 | `--respect-robots` | `RESEARCH_RESPECT_ROBOTS` | `True` |
 | `--no-scrape` | `RESEARCH_NO_SCRAPE` | `False` |
+
+#### Prompt Templates
+
+Bundled prompt templates live under `research-agent/prompts/`. To customise the
+planner, researcher, or critic instructions without editing Python code, copy
+that directory and point the CLI at your version:
+
+```bash
+cp -R research-agent/prompts /tmp/my-prompts
+python -m src.main --topic "AI Safety" --prompt-dir /tmp/my-prompts
+```
+
+Only the files you override need to exist in your custom directory; missing
+files fall back to the bundled defaults.
 
 ## Output Format
 
@@ -227,7 +275,7 @@ python -m pytest tests/ -v
 
 | Component | Library |
 |-----------|---------|
-| LLM | [Ollama](https://ollama.ai/) (local) |
+| LLM | [Ollama](https://ollama.ai/) or any OpenAI-compatible endpoint such as SiliconFlow |
 | Search | [Tavily](https://tavily.com/) Search + Extract API |
 | Scraping | [Playwright](https://playwright.dev/python/) (headless Chromium, optional) |
 | Vector store | [ChromaDB](https://www.trychroma.com/) *(optional, for semantic dedup)* |
