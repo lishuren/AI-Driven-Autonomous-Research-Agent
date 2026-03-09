@@ -12,46 +12,14 @@ import asyncio
 import json
 import logging
 import re
-import urllib.error
-import urllib.request
 from typing import Any, Optional
+
+from src.llm_client import generate_text
+from src.prompt_loader import load_prompt
 
 logger = logging.getLogger(__name__)
 
-_CRITIC_PROMPT = """You are a Senior Research Quality Auditor.
-
-Original research topic: "{topic}"
-Subtask being evaluated: "{task}"
-{user_context}
-ASSESSMENT RULES:
-- For TECHNICAL topics (code, algorithms, math): Check for logical steps, formulas, and library dependencies
-- For GENERAL topics (history, facts, entertainment, news): Check for detailed, specific information with proper structure
-- For MIXED topics: Apply relevant criteria from both categories
-
-Evaluate:
-1. Logical Steps / Clear Structure? (explanation or algorithm present)
-2. Specific Details? (concrete facts, not vague)
-3. Relevant to Subtask? (directly addresses the SUBTASK being evaluated — it does NOT need to answer
-   the entire original topic; sub-topics contribute a focused piece of the larger research)
-
-Decision rules:
-- If ALL three checks are YES → output status: PROCEED
-- If ANY check is NO → output status: REJECT and list what is missing
-
-Respond ONLY with JSON (no extra text):
-{{
-  "status": "PROCEED" | "REJECT",
-  "checks": {{
-    "logical_steps": true | false,
-    "specific_details": true | false,
-    "task_relevant": true | false
-  }},
-  "missing": "<concise description of what is missing, or empty string if PROCEED>"
-}}
-
-Research summary:
-{summary}
-"""
+_CRITIC_PROMPT_FILE = "critic_review.txt"
 
 _HEURISTIC_FORMULA_PATTERNS = [
     r"\$\$.*?\$\$",        # LaTeX display math
@@ -107,42 +75,26 @@ class CriticAgent:
         model: str = "qwen2.5:7b",
         ollama_base_url: str = "http://localhost:11434",
         user_prompt: Optional[str] = None,
+        llm_provider: str = "ollama",
+        llm_api_key: Optional[str] = None,
+        prompt_dir: Optional[str] = None,
     ) -> None:
         self.model = model
         self.ollama_base_url = ollama_base_url
         self._user_prompt = user_prompt
+        self._llm_provider = llm_provider
+        self._llm_api_key = llm_api_key
+        self._critic_prompt = load_prompt(_CRITIC_PROMPT_FILE, prompt_dir)
 
     def _call_ollama(self, prompt: str) -> Optional[str]:
-        payload = json.dumps(
-            {"model": self.model, "prompt": prompt, "stream": False}
-        ).encode()
-        req = urllib.request.Request(
-            f"{self.ollama_base_url.rstrip('/')}/api/generate",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
+        return generate_text(
+            prompt,
+            self.model,
+            self.ollama_base_url,
+            provider=self._llm_provider,
+            api_key=self._llm_api_key,
+            timeout=120,
         )
-        try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                data = json.loads(resp.read())
-                return data.get("response", "")
-        except urllib.error.HTTPError as exc:
-            error_text = ""
-            try:
-                payload = json.loads(exc.read().decode("utf-8", errors="ignore"))
-                if isinstance(payload, dict):
-                    error_text = str(payload.get("error", ""))
-            except Exception:
-                error_text = ""
-
-            if error_text:
-                logger.warning("Ollama critic call failed (%s): %s", exc.code, error_text)
-            else:
-                logger.warning("Ollama critic call failed (%s): %s", exc.code, exc.reason)
-            return None
-        except Exception as exc:
-            logger.warning("Ollama critic call failed: %s", exc)
-            return None
 
     def _parse_verdict(self, text: Optional[str]) -> Optional[dict[str, Any]]:
         if not text:
@@ -180,7 +132,12 @@ class CriticAgent:
                 "missing": "Empty summary – no content was retrieved.",
             }
 
-        prompt = _CRITIC_PROMPT.format(
+        prompt_template = getattr(
+            self,
+            "_critic_prompt",
+            load_prompt(_CRITIC_PROMPT_FILE),
+        )
+        prompt = prompt_template.format(
             topic=topic or task, task=task, summary=summary[:6000],
             user_context=(
                 f"User instructions:\n{self._user_prompt}\n"

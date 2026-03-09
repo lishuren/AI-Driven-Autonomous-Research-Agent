@@ -12,36 +12,17 @@ For a given task query:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import urllib.error
-import urllib.request
 from typing import Any, Optional
 
+from src.llm_client import generate_text
+from src.prompt_loader import load_prompt
 from src.tools.scraper_tool import ScraperTool
 from src.tools.search_tool import SearchTool, _detect_language
 
 logger = logging.getLogger(__name__)
 
-_SUMMARISE_PROMPT = """You are a research assistant producing concise, factual notes.
-
-Task: {task}
-{user_context}
-{language_hint}
-Below is raw scraped content from multiple web pages.  Write a concise summary
-(≤500 words) that directly answers the task.  Rules:
-- Report only facts that are actually present in the raw content below.
-- Do NOT invent, extrapolate, or hallucinate any details not in the source.
-- Match the style to the topic: for technical topics include formulas, algorithms,
-  and code only when genuinely present in the source; for general/entertainment
-  topics write plain prose describing what the sources say.
-- If the sources do not contain useful information for the task, explicitly say so.
-- DISCARD marketing copy, opinions, and redundant prose.
-
-Raw content:
-{raw_content}
-
-Summary:"""
+_SUMMARISE_PROMPT_FILE = "researcher_summarise.txt"
 
 _SCRAPE_TOP_N = 4
 _MIN_RAW_CONTENT_CHARS = 500  # threshold for "sufficient" Tavily raw_content
@@ -57,47 +38,31 @@ class ResearcherAgent:
         ollama_base_url: str = "http://localhost:11434",
         max_search_results: int = _SCRAPE_TOP_N,
         user_prompt: Optional[str] = None,
+        llm_provider: str = "ollama",
+        llm_api_key: Optional[str] = None,
+        prompt_dir: Optional[str] = None,
     ) -> None:
         self.model = model
         self.ollama_base_url = ollama_base_url
         self.max_search_results = max_search_results
         self._user_prompt = user_prompt
+        self._llm_provider = llm_provider
+        self._llm_api_key = llm_api_key
+        self._summarise_prompt = load_prompt(_SUMMARISE_PROMPT_FILE, prompt_dir)
 
         self._search = SearchTool(max_results=max_search_results)
         self._scraper = ScraperTool()
 
     def _call_ollama(self, prompt: str) -> Optional[str]:
-        """Synchronous Ollama call; returns the model's text response."""
-        payload = json.dumps(
-            {"model": self.model, "prompt": prompt, "stream": False}
-        ).encode()
-        req = urllib.request.Request(
-            f"{self.ollama_base_url.rstrip('/')}/api/generate",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
+        """Synchronous LLM call; returns the model's text response."""
+        return generate_text(
+            prompt,
+            self.model,
+            self.ollama_base_url,
+            provider=self._llm_provider,
+            api_key=self._llm_api_key,
+            timeout=180,
         )
-        try:
-            with urllib.request.urlopen(req, timeout=180) as resp:
-                data = json.loads(resp.read())
-                return data.get("response", "")
-        except urllib.error.HTTPError as exc:
-            error_text = ""
-            try:
-                payload = json.loads(exc.read().decode("utf-8", errors="ignore"))
-                if isinstance(payload, dict):
-                    error_text = str(payload.get("error", ""))
-            except Exception:
-                error_text = ""
-
-            if error_text:
-                logger.warning("Ollama summarisation failed (%s): %s", exc.code, error_text)
-            else:
-                logger.warning("Ollama summarisation failed (%s): %s", exc.code, exc.reason)
-            return None
-        except Exception as exc:
-            logger.warning("Ollama summarisation failed: %s", exc)
-            return None
 
     async def research(self, task: dict[str, Any]) -> dict[str, Any]:
         """Execute search + content acquisition + summarise for *task*.
@@ -193,7 +158,12 @@ class ResearcherAgent:
         language_hint = (
             "Write the summary in Chinese (中文)." if lang == "zh" else ""
         )
-        prompt = _SUMMARISE_PROMPT.format(
+        prompt_template = getattr(
+            self,
+            "_summarise_prompt",
+            load_prompt(_SUMMARISE_PROMPT_FILE),
+        )
+        prompt = prompt_template.format(
             task=subtopic, raw_content=raw_content[:12000],
             user_context=user_context,
             language_hint=language_hint,

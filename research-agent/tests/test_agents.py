@@ -24,8 +24,8 @@ class TestPlannerAgent:
             {"subtopic": "MACD", "query": "MACD calculation numpy"},
         ])
 
-        with patch("src.agents.planner._call_ollama", return_value=llm_output):
-            agent = PlannerAgent()
+        agent = PlannerAgent()
+        with patch.object(agent, "_call_llm", return_value=llm_output):
             tasks = event_loop.run_until_complete(
                 agent.decompose("Stock Trading Strategies")
             )
@@ -37,8 +37,8 @@ class TestPlannerAgent:
     def test_decompose_falls_back_on_bad_response(self, event_loop):
         from src.agents.planner import PlannerAgent
 
-        with patch("src.agents.planner._call_ollama", return_value="not json"):
-            agent = PlannerAgent()
+        agent = PlannerAgent()
+        with patch.object(agent, "_call_llm", return_value="not json"):
             tasks = event_loop.run_until_complete(agent.decompose("Topic"))
 
         assert len(tasks) == 5  # fallback generates 5 tasks
@@ -46,8 +46,8 @@ class TestPlannerAgent:
     def test_decompose_falls_back_on_none_response(self, event_loop):
         from src.agents.planner import PlannerAgent
 
-        with patch("src.agents.planner._call_ollama", return_value=None):
-            agent = PlannerAgent()
+        agent = PlannerAgent()
+        with patch.object(agent, "_call_llm", return_value=None):
             tasks = event_loop.run_until_complete(agent.decompose("Topic"))
 
         assert len(tasks) == 5
@@ -59,8 +59,8 @@ class TestPlannerAgent:
             {"subtopic": "RSI (refined)", "query": "RSI Wilder smoothing formula python"}
         )
 
-        with patch("src.agents.planner._call_ollama", return_value=llm_output):
-            agent = PlannerAgent()
+        agent = PlannerAgent()
+        with patch.object(agent, "_call_llm", return_value=llm_output):
             task = event_loop.run_until_complete(
                 agent.refine("RSI", "Missing Wilder smoothing formula")
             )
@@ -70,8 +70,8 @@ class TestPlannerAgent:
     def test_refine_falls_back_on_bad_response(self, event_loop):
         from src.agents.planner import PlannerAgent
 
-        with patch("src.agents.planner._call_ollama", return_value=None):
-            agent = PlannerAgent()
+        agent = PlannerAgent()
+        with patch.object(agent, "_call_llm", return_value=None):
             task = event_loop.run_until_complete(
                 agent.refine("RSI", "Missing formula")
             )
@@ -87,8 +87,8 @@ class TestPlannerAgent:
             {"subtopic": "RSI", "query": "RSI indicator python"},
         ])
 
-        with patch("src.agents.planner._call_ollama", return_value=llm_output):
-            agent = PlannerAgent()
+        agent = PlannerAgent()
+        with patch.object(agent, "_call_llm", return_value=llm_output):
             tasks = event_loop.run_until_complete(
                 agent.decompose(
                     "Stock Trading",
@@ -108,8 +108,8 @@ class TestPlannerAgent:
             {"subtopic": "Bollinger alternative", "query": "bollinger bands width formula"},
         ])
 
-        with patch("src.agents.planner._call_ollama", return_value=llm_output):
-            agent = PlannerAgent()
+        agent = PlannerAgent()
+        with patch.object(agent, "_call_llm", return_value=llm_output):
             tasks = event_loop.run_until_complete(
                 agent.decompose_retrospective(
                     "Bollinger Bands",
@@ -124,8 +124,8 @@ class TestPlannerAgent:
         """decompose_retrospective() falls back to 5 tasks on unparsable LLM output."""
         from src.agents.planner import PlannerAgent
 
-        with patch("src.agents.planner._call_ollama", return_value="not json"):
-            agent = PlannerAgent()
+        agent = PlannerAgent()
+        with patch.object(agent, "_call_llm", return_value="not json"):
             tasks = event_loop.run_until_complete(
                 agent.decompose_retrospective("Topic", failed_queries=["q1"])
             )
@@ -171,6 +171,23 @@ class TestPlannerAgent:
         vocab = event_loop.run_until_complete(agent._pre_search_vocab("RSI"))
 
         assert vocab == []
+
+    def test_custom_prompt_dir_overrides_planner_prompt(self, event_loop, tmp_path):
+        from src.agents.planner import PlannerAgent
+
+        custom_prompt = tmp_path / "planner_decompose.txt"
+        custom_prompt.write_text(
+            'CUSTOM PLANNER PROMPT\nTopic: {topic}\nAlready researched: {known_topics}\n'
+            '{vocab_section}\n{feedback_section}\n[]',
+            encoding="utf-8",
+        )
+
+        agent = PlannerAgent(prompt_dir=str(tmp_path))
+        with patch.object(agent, "_call_llm", return_value="[]") as mocked_call:
+            event_loop.run_until_complete(agent.decompose("RSI topic"))
+
+        prompt_text = mocked_call.call_args[0][0]
+        assert "CUSTOM PLANNER PROMPT" in prompt_text
 
 
 # ---------------------------------------------------------------------------
