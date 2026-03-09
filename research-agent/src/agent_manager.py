@@ -16,6 +16,7 @@ import logging
 import re
 import time
 from collections import deque
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -53,6 +54,21 @@ def _make_search_query(name: str) -> str:
     q = _DATE_PATTERNS.sub("", name)
     q = _SEPARATOR_RE.sub(" ", q)
     return q.strip()
+
+
+def _build_inline_refs(source_urls: list[str]) -> str:
+    """Return a Markdown inline-references string for *source_urls*.
+
+    Returns an empty string when no URLs are provided.
+    Example output: ``"\\n\\n*Sources: [1](https://a.com), [2](https://b.com)*"``
+    """
+    if not source_urls:
+        return ""
+    links = ", ".join(
+        f"[{i + 1}]({url})" for i, url in enumerate(source_urls)
+    )
+    return f"\n\n*Sources: {links}*"
+
 
 _REPORT_TEMPLATE = """\
 # {topic}
@@ -97,6 +113,7 @@ class AgentManager:
         max_nodes: Optional[int] = None,
         max_credits: Optional[float] = None,
         warn_threshold: float = 0.80,
+        task_json_path: Optional[Path] = None,
     ) -> None:
         self.topic = topic
         self._title = title if title is not None else topic
@@ -105,6 +122,9 @@ class AgentManager:
         self.reports_dir = Path(reports_dir)
         self.reports_dir.mkdir(parents=True, exist_ok=True)
         self._session_start: float = time.monotonic()
+
+        # Path for task.json persistence (optional — None disables auto-save)
+        self._task_json_path: Optional[Path] = task_json_path
 
         # Budget tracker — attach to the search module so every query is recorded
         self.budget = BudgetTracker(
@@ -145,6 +165,9 @@ class AgentManager:
         # Topic graph (built during build_graph)
         self._graph: Optional[TopicGraph] = None
 
+        # BFS depth cursor (initialised in build_graph; pre-set here for restore)
+        self._current_research_depth: int = 0
+
         # Flat fallback queue (used for simple topics or legacy mode)
         self._task_queue: deque[dict[str, str]] = deque()
         self._approved: list[dict[str, Any]] = []
@@ -168,6 +191,7 @@ class AgentManager:
         """Save the topic graph as a hierarchical JSON tree alongside the report.
 
         Excludes nodes with no summary or consolidated_summary.
+        Also triggers a task.json auto-save if a path was configured.
         """
         if self._graph is None:
             return
@@ -178,6 +202,114 @@ class AgentManager:
             json.dumps(tree, indent=2, ensure_ascii=False), encoding="utf-8",
         )
         logger.info("Topic tree JSON saved to %s", json_path)
+
+        # Persist task state for crash/quota recovery
+        if self._task_json_path is not None:
+            self.save_task()
+
+    # ------------------------------------------------------------------
+    # Task Persistence (save / restore)
+    # ------------------------------------------------------------------
+
+    def save_task(self, status: str = "in_progress") -> None:
+        """Persist full task state to the configured task_json_path.
+
+        Serializes the graph (if any), approved findings, and all tracking
+        counters so the session can be resumed exactly where it left off.
+
+        *status* should be ``"in_progress"`` for mid-run auto-saves and
+        ``"completed"`` when the session finishes normally.
+        """
+        if self._task_json_path is None:
+            return
+        state: dict[str, Any] = {
+            "version": 1,
+            "topic": self.topic,
+            "title": self._title,
+            "user_prompt": self._user_prompt,
+            "current_research_depth": self._current_research_depth,
+            "approved": self._approved,
+            "successful_queries": self._successful_queries,
+            "failed_queries": self._failed_queries,
+            "consecutive_failures": self._consecutive_failures,
+            "status": status,
+            "last_saved_iso": datetime.now(timezone.utc).isoformat(),
+        }
+        if self._graph is not None:
+            state["graph"] = self._graph.to_dict()
+        self._task_json_path.parent.mkdir(parents=True, exist_ok=True)
+        self._task_json_path.write_text(
+            json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8",
+        )
+        logger.debug("Task state saved to %s  [%s]", self._task_json_path, status)
+
+    def restore_task(self, task_json_path: Path) -> bool:
+        """Load and restore task state from *task_json_path*.
+
+        Applies the saved graph, depth cursor, approved findings, and
+        feedback counters so the agent resumes exactly where it left off.
+        Nodes whose status was ``"researching"`` or ``"analyzing"`` are reset
+        to ``"pending"`` so interrupted work is retried cleanly.
+
+        Returns ``True`` if state was successfully restored, ``False`` if
+        the file was missing, corrupt, or belongs to a completed session that
+        should be re-generated.
+        """
+        if not task_json_path.is_file():
+            return False
+        try:
+            state = json.loads(task_json_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning(
+                "Could not load task state from %s: %s — starting fresh.",
+                task_json_path, exc,
+            )
+            return False
+
+        if state.get("version", 1) > 1:
+            logger.warning(
+                "task.json version %s is newer than supported; ignoring.",
+                state.get("version"),
+            )
+            return False
+
+        prev_status = state.get("status", "in_progress")
+        last_saved = state.get("last_saved_iso", "unknown")
+
+        if prev_status == "completed":
+            # Previous run finished — restore graph for report regeneration,
+            # but has_graph_work() will return False so the loop exits quickly.
+            logger.info(
+                "Restoring completed session from %s (saved %s).",
+                task_json_path, last_saved,
+            )
+        else:
+            logger.info(
+                "Resuming in-progress session from %s (saved %s).",
+                task_json_path, last_saved,
+            )
+
+        # Restore flat-mode tracking state
+        self._approved = state.get("approved", [])
+        self._successful_queries = state.get("successful_queries", [])
+        self._failed_queries = state.get("failed_queries", [])
+        self._consecutive_failures = state.get("consecutive_failures", 0)
+        self._current_research_depth = state.get("current_research_depth", 0)
+
+        # Restore graph (if present)
+        if "graph" in state:
+            self._graph = TopicGraph.from_dict(state["graph"])
+            # Reset interrupted nodes so they will be retried
+            for node in self._graph._nodes.values():
+                if node.status in ("researching", "analyzing"):
+                    node.status = "pending"
+            logger.info(
+                "Restored graph with %d nodes at depth %d.",
+                self._graph.node_count(),
+                self._current_research_depth,
+            )
+
+        return True
 
     # ------------------------------------------------------------------
     # Queue Management (flat mode — kept for backward compatibility)
@@ -783,9 +915,13 @@ class AgentManager:
             sections: list[str] = []
             for finding in self._approved:
                 summary = finding.get("summary", "")
-                sections.append(f"### {finding['subtopic']}\n\n{summary}")
+                source_urls = finding.get("source_urls", [])
+                inline_refs = _build_inline_refs(source_urls)
+                sections.append(
+                    f"### {finding['subtopic']}\n\n{summary}{inline_refs}"
+                )
                 _extract_technical(summary)
-                sources.extend(finding.get("source_urls", []))
+                sources.extend(source_urls)
             findings_block = "## Findings\n\n" + "\n\n---\n\n".join(sections)
         else:
             findings_block = "## Findings\n\n_No approved findings yet._"
@@ -846,6 +982,7 @@ class AgentManager:
         Heading depth follows node depth: depth-1 children → ``###``,
         depth-2 → ``####``, etc.  The root node's own summary (if any)
         is emitted as intro prose directly under ``## Findings``.
+        Each section includes inline source reference links when available.
         """
         lines: list[str] = []
 
@@ -860,13 +997,16 @@ class AgentManager:
             has_content = summary and summary != "(duplicate — skipped)"
 
             if has_content:
+                inline_refs = _build_inline_refs(node.source_urls)
                 if is_root:
                     # Root summary becomes intro prose under ## Findings
-                    lines.append(summary)
+                    lines.append(f"{summary}{inline_refs}")
                 else:
                     heading_level = min(node.depth + 2, 6)  # depth 1→###, 2→####
                     prefix = "#" * heading_level
-                    lines.append(f"{prefix} {node.name}\n\n{summary}")
+                    lines.append(
+                        f"{prefix} {node.name}\n\n{summary}{inline_refs}"
+                    )
                 extract_fn(summary)
                 sources.extend(node.source_urls)
 

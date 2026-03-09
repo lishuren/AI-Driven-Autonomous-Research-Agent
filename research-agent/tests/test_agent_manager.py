@@ -495,3 +495,310 @@ class TestBudgetIntegration:
         for _ in range(95):
             manager.budget.record_query(credits=0)
         assert manager._adaptive_max_children() == 0
+
+
+class TestTaskJsonSaveRestore:
+    """Tests for AgentManager.save_task() and restore_task()."""
+
+    def _build_manager(self, topic, reports_dir, db_path, **kwargs):
+        from src.agent_manager import AgentManager
+
+        with patch("src.agent_manager.PlannerAgent"), \
+             patch("src.agent_manager.ResearcherAgent"), \
+             patch("src.agent_manager.CriticAgent"), \
+             patch("src.agent_manager.KnowledgeBase"):
+            return AgentManager(topic=topic, reports_dir=reports_dir,
+                                db_path=db_path, **kwargs)
+
+    def test_save_task_writes_json_file(self, tmp_path):
+        task_path = tmp_path / "task.json"
+        manager = self._build_manager(
+            "AI Research", str(tmp_path / "reports"), str(tmp_path / "db"),
+            task_json_path=task_path,
+        )
+        manager.save_task()
+        assert task_path.is_file()
+        data = json.loads(task_path.read_text(encoding="utf-8"))
+        assert data["topic"] == "AI Research"
+        assert data["status"] == "in_progress"
+        assert "last_saved_iso" in data
+        assert data["version"] == 1
+
+    def test_save_task_writes_completed_status(self, tmp_path):
+        task_path = tmp_path / "task.json"
+        manager = self._build_manager(
+            "AI Research", str(tmp_path / "reports"), str(tmp_path / "db"),
+            task_json_path=task_path,
+        )
+        manager.save_task(status="completed")
+        data = json.loads(task_path.read_text(encoding="utf-8"))
+        assert data["status"] == "completed"
+
+    def test_save_task_includes_graph_when_present(self, tmp_path):
+        from src.topic_graph import TopicGraph
+
+        task_path = tmp_path / "task.json"
+        manager = self._build_manager(
+            "AI Research", str(tmp_path / "reports"), str(tmp_path / "db"),
+            task_json_path=task_path,
+        )
+        manager._graph = TopicGraph(root_name="AI Research", root_query="AI")
+        manager.save_task()
+        data = json.loads(task_path.read_text(encoding="utf-8"))
+        assert "graph" in data
+        assert "root_id" in data["graph"]
+        assert "nodes" in data["graph"]
+
+    def test_save_task_no_path_does_nothing(self, tmp_path):
+        manager = self._build_manager(
+            "AI Research", str(tmp_path / "reports"), str(tmp_path / "db"),
+        )
+        # Should not raise and should not create any file
+        manager.save_task()
+        assert not (tmp_path / "task.json").exists()
+
+    def test_restore_task_returns_false_when_file_missing(self, tmp_path):
+        manager = self._build_manager(
+            "AI Research", str(tmp_path / "reports"), str(tmp_path / "db"),
+        )
+        result = manager.restore_task(tmp_path / "nonexistent.json")
+        assert result is False
+
+    def test_restore_task_returns_false_for_corrupt_json(self, tmp_path):
+        bad = tmp_path / "task.json"
+        bad.write_text("{corrupt", encoding="utf-8")
+        manager = self._build_manager(
+            "AI Research", str(tmp_path / "reports"), str(tmp_path / "db"),
+        )
+        result = manager.restore_task(bad)
+        assert result is False
+
+    def test_restore_task_restores_approved_and_queries(self, tmp_path):
+        task_path = tmp_path / "task.json"
+        state = {
+            "version": 1,
+            "topic": "AI Research",
+            "title": "AI Research",
+            "user_prompt": None,
+            "current_research_depth": 1,
+            "approved": [{"subtopic": "NLP", "query": "nlp", "summary": "s", "source_urls": []}],
+            "successful_queries": ["nlp"],
+            "failed_queries": ["bad"],
+            "consecutive_failures": 2,
+            "status": "in_progress",
+            "last_saved_iso": "2026-01-01T00:00:00+00:00",
+        }
+        task_path.write_text(json.dumps(state), encoding="utf-8")
+
+        manager = self._build_manager(
+            "AI Research", str(tmp_path / "reports"), str(tmp_path / "db"),
+        )
+        result = manager.restore_task(task_path)
+
+        assert result is True
+        assert manager._approved == state["approved"]
+        assert manager._successful_queries == ["nlp"]
+        assert manager._failed_queries == ["bad"]
+        assert manager._consecutive_failures == 2
+        assert manager._current_research_depth == 1
+
+    def test_restore_task_restores_graph(self, tmp_path):
+        from src.topic_graph import TopicGraph
+
+        # Build and save a graph
+        task_path = tmp_path / "task.json"
+        g = TopicGraph(root_name="AI", root_query="AI")
+        child = g.add_node(name="NLP", query="nlp", parent_id=g.root.id)
+        g.mark_leaf(child.id)
+        g.mark_researched(child.id, "NLP summary", ["https://example.com"])
+
+        state = {
+            "version": 1,
+            "topic": "AI",
+            "title": "AI",
+            "user_prompt": None,
+            "current_research_depth": 1,
+            "approved": [],
+            "successful_queries": [],
+            "failed_queries": [],
+            "consecutive_failures": 0,
+            "status": "in_progress",
+            "last_saved_iso": "2026-01-01T00:00:00+00:00",
+            "graph": g.to_dict(),
+        }
+        task_path.write_text(json.dumps(state), encoding="utf-8")
+
+        manager = self._build_manager(
+            "AI", str(tmp_path / "reports"), str(tmp_path / "db"),
+        )
+        result = manager.restore_task(task_path)
+
+        assert result is True
+        assert manager._graph is not None
+        assert manager._graph.node_count() == 2
+        restored_child = manager._graph.find_by_name("NLP")
+        assert restored_child is not None
+        assert restored_child.summary == "NLP summary"
+
+    def test_restore_task_resets_researching_nodes_to_pending(self, tmp_path):
+        """Nodes in 'researching' status must be reset so they are retried."""
+        from src.topic_graph import TopicGraph
+
+        task_path = tmp_path / "task.json"
+        g = TopicGraph(root_name="AI", root_query="AI")
+        child = g.add_node(name="NLP", query="nlp", parent_id=g.root.id)
+        g.mark_leaf(child.id)
+        g.mark_researching(child.id)  # interrupted mid-research
+
+        state = {
+            "version": 1, "topic": "AI", "title": "AI", "user_prompt": None,
+            "current_research_depth": 0, "approved": [], "successful_queries": [],
+            "failed_queries": [], "consecutive_failures": 0,
+            "status": "in_progress", "last_saved_iso": "2026-01-01T00:00:00+00:00",
+            "graph": g.to_dict(),
+        }
+        task_path.write_text(json.dumps(state), encoding="utf-8")
+
+        manager = self._build_manager(
+            "AI", str(tmp_path / "reports"), str(tmp_path / "db"),
+        )
+        manager.restore_task(task_path)
+
+        restored_child = manager._graph.find_by_name("NLP")
+        assert restored_child.status == "pending"  # reset from 'researching'
+
+    def test_restore_task_returns_true_for_completed_status(self, tmp_path):
+        """Completed tasks are restored (graph available for report gen) but return True."""
+        task_path = tmp_path / "task.json"
+        state = {
+            "version": 1, "topic": "AI", "title": "AI", "user_prompt": None,
+            "current_research_depth": 0, "approved": [], "successful_queries": [],
+            "failed_queries": [], "consecutive_failures": 0,
+            "status": "completed", "last_saved_iso": "2026-01-01T00:00:00+00:00",
+        }
+        task_path.write_text(json.dumps(state), encoding="utf-8")
+        manager = self._build_manager(
+            "AI", str(tmp_path / "reports"), str(tmp_path / "db"),
+        )
+        result = manager.restore_task(task_path)
+        assert result is True
+
+    def test_save_restore_roundtrip(self, tmp_path):
+        """save_task() followed by restore_task() preserves all state."""
+        from src.topic_graph import TopicGraph
+
+        task_path = tmp_path / "task.json"
+        manager = self._build_manager(
+            "AI Research", str(tmp_path / "reports"), str(tmp_path / "db"),
+            task_json_path=task_path,
+        )
+        manager._graph = TopicGraph(root_name="AI Research", root_query="AI")
+        manager._current_research_depth = 1
+        manager._approved = [{"subtopic": "ML", "summary": "summary", "source_urls": []}]
+        manager._successful_queries = ["ml query"]
+        manager._failed_queries = ["bad query"]
+        manager._consecutive_failures = 1
+        manager.save_task()
+
+        # Create fresh manager and restore
+        manager2 = self._build_manager(
+            "AI Research", str(tmp_path / "reports"), str(tmp_path / "db"),
+        )
+        result = manager2.restore_task(task_path)
+
+        assert result is True
+        assert manager2._current_research_depth == 1
+        assert manager2._approved[0]["subtopic"] == "ML"
+        assert manager2._successful_queries == ["ml query"]
+        assert manager2._failed_queries == ["bad query"]
+        assert manager2._consecutive_failures == 1
+        assert manager2._graph is not None
+
+
+class TestInlineSourceLinks:
+    """Tests for inline source reference links in generated reports."""
+
+    def _build_manager(self, topic, reports_dir, db_path):
+        from src.agent_manager import AgentManager
+
+        with patch("src.agent_manager.PlannerAgent"), \
+             patch("src.agent_manager.ResearcherAgent"), \
+             patch("src.agent_manager.CriticAgent"), \
+             patch("src.agent_manager.KnowledgeBase"):
+            return AgentManager(topic=topic, reports_dir=reports_dir, db_path=db_path)
+
+    def test_build_inline_refs_empty(self):
+        from src.agent_manager import _build_inline_refs
+        assert _build_inline_refs([]) == ""
+
+    def test_build_inline_refs_single(self):
+        from src.agent_manager import _build_inline_refs
+        result = _build_inline_refs(["https://example.com"])
+        assert "*Sources:" in result
+        assert "[1](https://example.com)" in result
+
+    def test_build_inline_refs_multiple(self):
+        from src.agent_manager import _build_inline_refs
+        result = _build_inline_refs(["https://a.com", "https://b.com"])
+        assert "[1](https://a.com)" in result
+        assert "[2](https://b.com)" in result
+
+    def test_graph_report_includes_inline_source_links(self, tmp_path):
+        """Reports generated from a graph include inline source links per section."""
+        from src.topic_graph import TopicGraph
+        from src.agent_manager import AgentManager
+
+        manager = self._build_manager(
+            "AI Research", str(tmp_path / "reports"), str(tmp_path / "db"),
+        )
+        g = TopicGraph(root_name="AI Research", root_query="AI")
+        child = g.add_node(name="NLP", query="nlp", parent_id=g.root.id)
+        g.mark_leaf(child.id)
+        g.mark_researched(
+            child.id,
+            "Natural language processing overview.",
+            ["https://nlp.example.com"],
+        )
+        manager._graph = g
+
+        report_path = manager.generate_report()
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "[1](https://nlp.example.com)" in content
+
+    def test_flat_report_includes_inline_source_links(self, tmp_path):
+        """Flat-mode reports (no graph) also include inline source links."""
+        manager = self._build_manager(
+            "AI Research", str(tmp_path / "reports"), str(tmp_path / "db"),
+        )
+        manager._approved = [
+            {
+                "subtopic": "Machine Learning",
+                "query": "ML basics",
+                "summary": "Overview of ML.",
+                "source_urls": ["https://ml.example.com"],
+            }
+        ]
+
+        report_path = manager.generate_report()
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "[1](https://ml.example.com)" in content
+
+    def test_report_no_inline_refs_when_no_sources(self, tmp_path):
+        """Sections with no source URLs have no inline *Sources:* text."""
+        from src.topic_graph import TopicGraph
+
+        manager = self._build_manager(
+            "AI Research", str(tmp_path / "reports"), str(tmp_path / "db"),
+        )
+        g = TopicGraph(root_name="AI Research", root_query="AI")
+        child = g.add_node(name="NLP", query="nlp", parent_id=g.root.id)
+        g.mark_leaf(child.id)
+        g.mark_researched(child.id, "NLP summary.", [])  # no sources
+        manager._graph = g
+
+        report_path = manager.generate_report()
+        content = report_path.read_text(encoding="utf-8")
+
+        assert "*Sources:" not in content
