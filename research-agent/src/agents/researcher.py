@@ -158,12 +158,7 @@ class ResearcherAgent:
         language_hint = (
             "Write the summary in Chinese (中文)." if lang == "zh" else ""
         )
-        prompt_template = getattr(
-            self,
-            "_summarise_prompt",
-            load_prompt(_SUMMARISE_PROMPT_FILE),
-        )
-        prompt = prompt_template.format(
+        prompt = self._summarise_prompt.format(
             task=subtopic, raw_content=raw_content[:12000],
             user_context=user_context,
             language_hint=language_hint,

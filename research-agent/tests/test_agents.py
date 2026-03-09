@@ -287,6 +287,9 @@ class TestResearcherAgent:
             instance.ollama_base_url = "http://localhost:11434"
             instance.max_search_results = 4
             instance._user_prompt = None
+            instance._summarise_prompt = (
+                "Task: {task}\n{user_context}\n{language_hint}\n{raw_content}"
+            )
 
             mock_search = MagicMock()
             mock_search.search = AsyncMock(return_value=[

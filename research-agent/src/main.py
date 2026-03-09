@@ -410,7 +410,7 @@ def _parse_requirements_file(path: Path) -> tuple[str, str, Optional[str]]:
         for key, val in sections.items():
             if key not in {"topic", "prompt"} and val:
                 context_parts.append(val)
-        context = "\n\n".join(p for p in context_parts if p)
+        context = "\n\n".join(context_parts)
         user_prompt = context or None
     elif sections:
         # Has section markers but no ## Topic — use non-section text + all
@@ -459,7 +459,13 @@ async def run(
     max_credits: Optional[float] = None,
     warn_threshold: float = 0.80,
 ) -> None:
-    """Main async loop – runs for *duration_seconds* seconds."""
+    """Main async loop – runs for *duration_seconds* seconds.
+
+    Additional LLM-related parameters:
+    - ``llm_provider`` selects Ollama or an OpenAI-compatible backend.
+    - ``llm_api_key`` is used for online providers.
+    - ``prompt_dir`` overrides bundled prompt templates when provided.
+    """
     start_time = time.monotonic()
     end_time = start_time + duration_seconds
     cycles_completed = 0
@@ -668,6 +674,9 @@ async def estimate_run(
     Uses LLM decomposition (Ollama) only — all Tavily API calls are suppressed.
     The graph structure determines how many leaf nodes need to be researched,
     which gives the estimated search credit cost.
+
+    ``llm_provider``, ``llm_api_key``, and ``prompt_dir`` mirror ``run()`` so
+    dry-run estimation uses the same provider and prompt configuration.
 
     Credit estimates:
     - **Conservative**: 1 credit per leaf (1 search, no extract, first-try success)

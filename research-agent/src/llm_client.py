@@ -9,7 +9,7 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 _DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
-_DEFAULT_OPENAI_BASE_URL = "https://api.siliconflow.cn/v1"
+_DEFAULT_ONLINE_LLM_BASE_URL = "https://api.siliconflow.cn/v1"
 
 
 def normalize_provider(provider: Optional[str]) -> str:
@@ -23,7 +23,7 @@ def normalize_provider(provider: Optional[str]) -> str:
 def default_base_url(provider: Optional[str]) -> str:
     """Return the default base URL for *provider*."""
     if normalize_provider(provider) == "openai":
-        return _DEFAULT_OPENAI_BASE_URL
+        return _DEFAULT_ONLINE_LLM_BASE_URL
     return _DEFAULT_OLLAMA_BASE_URL
 
 

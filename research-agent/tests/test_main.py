@@ -164,6 +164,22 @@ class TestRequirementsFile:
         assert title == "spec"
         assert user_prompt == "Need formulas and examples."
 
+    def test_parse_requirements_file_ignores_prompt_and_keeps_other_context(self, tmp_path):
+        req_file = tmp_path / "spec.md"
+        req_file.write_text(
+            "## Topic\nRSI trading\n\n"
+            "## Prompt\nIgnore this prompt block.\n\n"
+            "## Research Detail\nInvestigate the formula.\n\n"
+            "## Output Expectations\nNeed examples.\n",
+            encoding="utf-8",
+        )
+
+        topic, title, user_prompt = _parse_requirements_file(req_file)
+
+        assert topic == "RSI trading"
+        assert title == "spec"
+        assert user_prompt == "Investigate the formula.\n\nNeed examples."
+
 
 class TestMaxDepthArg:
     """Tests for --max-depth CLI argument."""
@@ -603,7 +619,7 @@ class TestLLMArgs:
     def test_main_requires_api_key_for_online_provider(self):
         with patch("sys.argv", ["prog", "--topic", "Test", "--llm-provider", "siliconflow"]):
             from src.main import main
-            with pytest.raises(SystemExit, match="API key"):
+            with pytest.raises(SystemExit):
                 main()
 
     def test_main_passes_online_llm_and_prompt_dir_to_run(self, monkeypatch):

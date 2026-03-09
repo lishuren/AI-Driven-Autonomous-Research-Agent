@@ -132,12 +132,7 @@ class CriticAgent:
                 "missing": "Empty summary – no content was retrieved.",
             }
 
-        prompt_template = getattr(
-            self,
-            "_critic_prompt",
-            load_prompt(_CRITIC_PROMPT_FILE),
-        )
-        prompt = prompt_template.format(
+        prompt = self._critic_prompt.format(
             topic=topic or task, task=task, summary=summary[:6000],
             user_context=(
                 f"User instructions:\n{self._user_prompt}\n"
