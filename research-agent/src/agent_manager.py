@@ -300,7 +300,7 @@ class AgentManager:
         if "graph" in state:
             self._graph = TopicGraph.from_dict(state["graph"])
             # Reset interrupted nodes so they will be retried
-            for node in self._graph._nodes.values():
+            for node in self._graph.get_all_nodes():
                 if node.status in ("researching", "analyzing"):
                     node.status = "pending"
             logger.info(

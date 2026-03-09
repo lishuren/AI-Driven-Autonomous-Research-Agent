@@ -581,7 +581,7 @@ class TestTaskJsonSaveRestore:
             "title": "AI Research",
             "user_prompt": None,
             "current_research_depth": 1,
-            "approved": [{"subtopic": "NLP", "query": "nlp", "summary": "s", "source_urls": []}],
+            "approved": [{"subtopic": "NLP", "query": "nlp", "summary": "Natural language processing overview.", "source_urls": []}],
             "successful_queries": ["nlp"],
             "failed_queries": ["bad"],
             "consecutive_failures": 2,

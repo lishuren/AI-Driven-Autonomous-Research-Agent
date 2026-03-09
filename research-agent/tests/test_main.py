@@ -948,8 +948,6 @@ class TestTaskJsonPersistence:
 
         captured_kwargs: dict = {}
 
-        real_AgentManager = None
-
         def spy_init(**kwargs):
             captured_kwargs.update(kwargs)
             return mock_manager
