@@ -160,6 +160,52 @@ def _parse_duration(value: str) -> float:
     return total
 
 
+def _parse_topic_dir(folder: Path) -> tuple[str, str, Optional[str], Optional[str]]:
+    """Parse a topic directory and return (topic, title, user_prompt, prompt_dir).
+
+    Searches the folder for a requirements/topic file in priority order:
+    1. ``requirements.md``
+    2. ``topic.md``
+    3. The first ``.md`` file found (alphabetically), excluding any ``prompts/``
+       sub-folder.
+
+    If no Markdown file is found the folder name is used as the topic.
+
+    The report title is always the folder name for consistency.
+
+    When a ``prompts/`` sub-folder exists it is returned as *prompt_dir* so
+    that its template files override the bundled defaults.
+    """
+    # Determine prompt override directory
+    prompt_dir: Optional[str] = None
+    prompts_sub = folder / "prompts"
+    if prompts_sub.is_dir():
+        prompt_dir = str(prompts_sub)
+
+    # Locate the requirements / topic file
+    md_file: Optional[Path] = None
+    for candidate in ("requirements.md", "topic.md"):
+        if (folder / candidate).is_file():
+            md_file = folder / candidate
+            break
+
+    if md_file is None:
+        # Fall back to the first .md file (skip the prompts sub-folder)
+        for p in sorted(folder.glob("*.md")):
+            md_file = p
+            break
+
+    if md_file is not None:
+        topic, _file_title, user_prompt = _parse_requirements_file(md_file)
+    else:
+        topic = folder.name
+        user_prompt = None
+
+    # Always use the folder name as the report title
+    title = folder.name
+    return topic, title, user_prompt, prompt_dir
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Autonomous Research Agent – runs for a set duration."
@@ -181,6 +227,19 @@ def _parse_args() -> argparse.Namespace:
         help="Path to a plain-text or Markdown file containing the full "
              "research specification (research details and output expectations). "
              "The file name stem is used as the report title.",
+    )
+    topic_group.add_argument(
+        "--topic-dir",
+        type=str,
+        default=None,
+        metavar="DIR",
+        help="Path to a folder that represents a self-contained research task. "
+             "The agent reads the topic from requirements.md, topic.md, or the "
+             "first .md file found in the folder. If a 'prompts/' sub-folder "
+             "exists it is used as the prompt directory. All output (reports, "
+             "database, task.json) is written to an 'output/' sub-folder that "
+             "is created automatically. Re-running the same command resumes from "
+             "the last saved state stored in 'output/task.json'.",
     )
     duration_group = parser.add_mutually_exclusive_group()
     duration_group.add_argument(
@@ -458,6 +517,7 @@ async def run(
     max_nodes: Optional[int] = None,
     max_credits: Optional[float] = None,
     warn_threshold: float = 0.80,
+    task_json_path: Optional[str] = None,
 ) -> None:
     """Main async loop – runs for *duration_seconds* seconds.
 
@@ -524,6 +584,7 @@ async def run(
         max_nodes=max_nodes,
         max_credits=max_credits,
         warn_threshold=warn_threshold,
+        task_json_path=Path(task_json_path) if task_json_path else None,
     )
 
     await manager.init()
@@ -561,15 +622,25 @@ async def run(
         # Write an initial placeholder report so the file exists immediately.
         manager.generate_report()
 
-        # Build the hierarchical topic graph (recursive decomposition)
-        logger.info("Building topic graph ...")
-        try:
-            await manager.build_graph()
-        except Exception as exc:
-            logger.error("Graph build failed: %s — falling back to flat mode.", exc)
-            await manager.populate_queue()
+        # Try to restore from a previously saved task state (crash/quota recovery).
+        task_restored = False
+        if task_json_path:
+            task_path = Path(task_json_path)
+            if task_path.is_file():
+                task_restored = manager.restore_task(task_path)
 
-        manager.generate_report()  # Update report with graph outline
+        if task_restored:
+            manager.generate_report()  # Refresh report with restored graph
+        else:
+            # Fresh start: build the hierarchical topic graph
+            logger.info("Building topic graph ...")
+            try:
+                await manager.build_graph()
+            except Exception as exc:
+                logger.error("Graph build failed: %s — falling back to flat mode.", exc)
+                await manager.populate_queue()
+
+            manager.generate_report()  # Update report with graph outline
 
         budget_logged = False
         while True:
@@ -645,6 +716,14 @@ async def run(
         # Always generate the final report
         elapsed = time.monotonic() - start_time
         report_path = manager.generate_report(elapsed_seconds=elapsed)
+        # Persist final task state (mark completed when all graph work is done)
+        if task_json_path:
+            final_status = (
+                "completed"
+                if manager._graph is not None and manager._graph.is_complete()
+                else "in_progress"
+            )
+            manager.save_task(status=final_status)
         await manager.close()
         budget_info = manager.budget.summary()
         logger.info(
@@ -844,7 +923,22 @@ def main() -> None:
 
     # Resolve topic, title, and optional user prompt
     user_prompt: Optional[str] = None
-    if args.requirements_file is not None:
+    task_json_path: Optional[str] = None
+    if args.topic_dir is not None:
+        topic_dir = Path(args.topic_dir)
+        if not topic_dir.is_dir():
+            sys.exit(f"Topic directory not found: {args.topic_dir!r}")
+        topic, report_title, user_prompt, dir_prompt_dir = _parse_topic_dir(topic_dir)
+        # Output goes to <folder>/output/
+        output_dir = topic_dir / "output"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        # Override paths derived from --data-dir / --reports-dir / --db-path
+        args.data_dir = str(output_dir)
+        # Apply prompts sub-folder only when the user hasn't already set --prompt-dir
+        if dir_prompt_dir is not None and not prompt_dir:
+            prompt_dir = dir_prompt_dir
+        task_json_path = str(output_dir / "task.json")
+    elif args.requirements_file is not None:
         req_path = Path(args.requirements_file)
         if not req_path.is_file():
             sys.exit(f"Requirements file not found: {args.requirements_file!r}")
@@ -852,6 +946,10 @@ def main() -> None:
     else:
         topic = args.topic
         report_title = None
+
+    # --data-dir also activates task.json persistence (if not already set by --topic-dir)
+    if task_json_path is None and args.data_dir is not None:
+        task_json_path = str(Path(args.data_dir) / "task.json")
 
     # --tavily-key CLI arg overrides env var / .env
     if args.tavily_key:
@@ -957,6 +1055,7 @@ def main() -> None:
                 max_nodes=max_nodes,
                 max_credits=max_credits,
                 warn_threshold=warn_threshold,
+                task_json_path=task_json_path,
             )
         )
     except KeyboardInterrupt:

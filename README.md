@@ -68,6 +68,25 @@ python3 research-agent/check_tavily_usage.py
 
 This reads `TAVILY_API_KEY` from the environment or from `research-agent/.env`, shows plan name, credits used/remaining, a per-type breakdown (Search / Extract / Crawl), and a local history table that accumulates across runs.
 
+## Quick Start
+
+### 1. Prerequisites
+
+* Python 3.10+
+* Either:
+  * [Ollama](https://ollama.ai/) running locally (`ollama serve`), or
+  * an OpenAI-compatible online LLM endpoint such as [SiliconFlow](https://www.siliconflowcn.com/)
+* A model available from your chosen provider
+* **Tavily API key** — set `TAVILY_API_KEY` in your environment or pass `--tavily-key`. Sign up at [tavily.com](https://tavily.com) (free tier: 1,000 credits/month)
+
+To check your current credit balance and usage history at any time:
+
+```bash
+python3 research-agent/check_tavily_usage.py
+```
+
+This reads `TAVILY_API_KEY` from the environment or from `research-agent/.env`, shows plan name, credits used/remaining, a per-type breakdown (Search / Extract / Crawl), and a local history table that accumulates across runs.
+
 ### 2. Install
 
 ```bash
@@ -83,6 +102,9 @@ python -m src.main --topic "Stock Trading Strategies"
 
 # Use a requirements file with full research spec and output expectations
 python -m src.main --requirements-file requirements.md
+
+# Use a folder as a self-contained research task (recommended for complex projects)
+python -m src.main --topic-dir ./my-research/ --duration 2h
 
 # Short 30-minute run with a different model
 python -m src.main --topic "Reinforcement Learning" --hours 0.5 --model mistral
@@ -155,6 +177,75 @@ Notes:
 - Model quality/speed depends on hardware and quantization level.
 - For stable reproducibility, pin the model explicitly with `--model`.
 
+#### Topic Directory (`--topic-dir`)
+
+Pass an entire folder as a self-contained research task.  The agent reads the
+topic from the folder, writes all output inside it, and can **resume
+automatically** after a crash or quota interruption.
+
+**Folder layout:**
+
+```
+my-research/
+├── requirements.md      ← topic file (or topic.md, or any .md)
+├── prompts/             ← optional: prompt template overrides
+│   └── planner_decompose.md
+└── output/              ← auto-created on first run
+    ├── reports/         ← generated Markdown reports + JSON trees
+    ├── research.db      ← SQLite knowledge base
+    ├── task.json        ← persistent progress checkpoint
+    └── search.jsonl     ← optional search query log
+```
+
+**Topic file resolution order** (first match wins):
+1. `requirements.md`
+2. `topic.md`
+3. First `.md` file found alphabetically in the folder
+4. Folder name used as-is if no `.md` file exists
+
+**Example commands:**
+
+```bash
+# Create a topic folder
+mkdir my-research
+echo "## Topic\nQuantum Computing" > my-research/requirements.md
+
+# First run — builds graph and starts researching
+python -m src.main --topic-dir ./my-research/ --duration 2h
+
+# Re-run after a quota/crash interruption — resumes from task.json automatically
+python -m src.main --topic-dir ./my-research/ --duration 2h
+```
+
+The `prompts/` subfolder, when present, is automatically used as `--prompt-dir`.
+An explicit `--prompt-dir` on the CLI always takes precedence over the folder's
+`prompts/` subfolder.
+
+#### Crash Recovery / Progress Persistence (`task.json`)
+
+When a data directory is active (via `--topic-dir` or `--data-dir`), the agent
+writes a `task.json` checkpoint after every completed research node.  If the
+run is interrupted — power off, network loss, API quota exhaustion — simply
+re-run the **same command** and the agent will:
+
+1. Detect the existing `task.json`.
+2. Restore the full topic graph and all approved findings.
+3. Reset any nodes that were mid-research (`researching` / `analyzing`) back to
+   `pending` so they are retried cleanly.
+4. Continue from where it left off, skipping the graph-build phase entirely.
+
+The final `task.json` contains `"status": "completed"` once the graph is fully
+consolidated.  Re-running a completed session regenerates the report without
+performing new searches.
+
+```bash
+# With --data-dir, task.json lives at <data-dir>/task.json
+python -m src.main --topic "AI Safety" --data-dir ./ai-safety-data/ --duration 3h
+
+# After interruption — same command resumes from checkpoint
+python -m src.main --topic "AI Safety" --data-dir ./ai-safety-data/ --duration 3h
+```
+
 #### Requirements File Format
 
 For complex research tasks, create a plain-text or Markdown file that contains
@@ -183,6 +274,7 @@ back-testing methodology, and known pitfalls.
 |------|---------|-------------|
 | `--topic` | *(required\*)* | High-level research topic as inline text |
 | `--requirements-file` | *(required\*)* | Path to a file with the full research specification |
+| `--topic-dir` | *(required\*)* | Path to a folder containing a requirements file; all output goes to `<folder>/output/`; re-running resumes from `task.json` |
 | `--hours` | `8` | Hard time limit in hours. Research stops and the report is saved when the duration expires. |
 | `--duration` | — | Hard time limit in human-readable format (e.g. `10m`, `1h30m`, `90s`). Overrides `--hours`. Research stops and the report is saved when the duration expires. If research finishes before the deadline, the agent logs a suggestion to re-run with a higher `--max-depth`. |
 | `--model` | `qwen2.5:7b` | Model name for the selected LLM provider |
@@ -192,7 +284,7 @@ back-testing methodology, and known pitfalls.
 | `--ollama-url` | `http://localhost:11434` | Ollama base URL when `--llm-provider=ollama` |
 | `--prompt-dir` | bundled prompts | Directory containing prompt template overrides |
 | `--tavily-key` | *(env `TAVILY_API_KEY`)* | Tavily API key for web search |
-| `--data-dir` | — | Base data directory; overrides `--reports-dir`, `--db-path`, and `--search-log` defaults |
+| `--data-dir` | — | Base data directory; overrides `--reports-dir`, `--db-path`, and `--search-log` defaults; also enables `task.json` persistence |
 | `--reports-dir` | `data/reports` | Output directory for Markdown reports |
 | `--db-path` | `data/research.db` | SQLite database path |
 | `--search-log` | — | Path to a JSONL file logging every search query and result domains |
@@ -210,7 +302,7 @@ back-testing methodology, and known pitfalls.
 | `--no-respect-robots` | — | Disable `robots.txt` advisory checks |
 | `--no-scrape` | `False` | Disable Playwright entirely; content comes from Tavily only |
 
-\* Exactly one of `--topic` or `--requirements-file` is required.
+\* Exactly one of `--topic`, `--requirements-file`, or `--topic-dir` is required.
 
 #### Environment Variable Fallbacks
 
@@ -245,13 +337,15 @@ directory; missing files fall back to the bundled defaults.
 
 ## Output Format
 
-Reports are saved to `data/reports/<topic>.md`:
+Reports are saved to `data/reports/<topic>.md` (or `<folder>/output/reports/` when using `--topic-dir`):
 
 ```markdown
 # Stock Trading Strategies
 
 ## Implementation Logic
 1. **RSI** – Step 1: import pandas…
+
+   *Sources: [1](https://investopedia.com/rsi) [2](https://arxiv.org/abs/...)*
 
 ## Math/Formulas
 $$ RSI = 100 - \frac{100}{1 + RS} $$
@@ -261,8 +355,14 @@ $$ RSI = 100 - \frac{100}{1 + RS} $$
 - `pandas`
 
 ## Sources
-- https://…
+- https://investopedia.com/rsi
+- https://arxiv.org/abs/...
 ```
+
+Each finding section includes **inline source reference links** (`*Sources: [1](url)*`)
+directly after the summary text, so readers can follow citations without scrolling
+to the bottom.  The global `## Sources` list at the end is preserved for a complete
+reference overview.
 
 ## Running Tests
 

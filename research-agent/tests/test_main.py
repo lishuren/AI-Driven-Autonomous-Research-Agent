@@ -718,3 +718,332 @@ class TestEstimateRun:
 
         out = capsys.readouterr().out
         assert "2" in out  # 2 leaf nodes mentioned somewhere in estimate output
+
+
+class TestTopicDir:
+    """Tests for --topic-dir argument and _parse_topic_dir helper."""
+
+    def _parse(self, extra_args: list[str]) -> "argparse.Namespace":
+        from src.main import _parse_args
+
+        with patch("sys.argv", ["prog"] + extra_args):
+            return _parse_args()
+
+    # --- argument parsing ---
+
+    def test_topic_dir_stored_in_namespace(self, tmp_path):
+        folder = tmp_path / "my-research"
+        folder.mkdir()
+        args = self._parse(["--topic-dir", str(folder)])
+        assert args.topic_dir == str(folder)
+
+    def test_topic_dir_exclusive_with_topic(self, tmp_path):
+        folder = tmp_path / "my-research"
+        folder.mkdir()
+        with pytest.raises(SystemExit):
+            self._parse(["--topic", "Test", "--topic-dir", str(folder)])
+
+    def test_topic_dir_exclusive_with_requirements_file(self, tmp_path):
+        folder = tmp_path / "my-research"
+        folder.mkdir()
+        req = tmp_path / "spec.md"
+        req.write_text("content")
+        with pytest.raises(SystemExit):
+            self._parse(["--requirements-file", str(req), "--topic-dir", str(folder)])
+
+    # --- _parse_topic_dir ---
+
+    def test_parse_topic_dir_uses_requirements_md(self, tmp_path):
+        from src.main import _parse_topic_dir
+
+        folder = tmp_path / "project"
+        folder.mkdir()
+        (folder / "requirements.md").write_text("## Topic\nAI Agents\n", encoding="utf-8")
+
+        topic, title, user_prompt, prompt_dir = _parse_topic_dir(folder)
+        assert topic == "AI Agents"
+        assert title == "project"
+        assert prompt_dir is None
+
+    def test_parse_topic_dir_uses_topic_md_over_other_md(self, tmp_path):
+        from src.main import _parse_topic_dir
+
+        folder = tmp_path / "project"
+        folder.mkdir()
+        (folder / "topic.md").write_text("## Topic\nML Research\n", encoding="utf-8")
+        (folder / "other.md").write_text("## Topic\nUnrelated\n", encoding="utf-8")
+
+        topic, title, user_prompt, prompt_dir = _parse_topic_dir(folder)
+        assert topic == "ML Research"
+
+    def test_parse_topic_dir_falls_back_to_first_md(self, tmp_path):
+        from src.main import _parse_topic_dir
+
+        folder = tmp_path / "project"
+        folder.mkdir()
+        (folder / "analysis.md").write_text("## Topic\nMarket Research\n", encoding="utf-8")
+
+        topic, title, user_prompt, prompt_dir = _parse_topic_dir(folder)
+        assert topic == "Market Research"
+
+    def test_parse_topic_dir_falls_back_to_folder_name(self, tmp_path):
+        from src.main import _parse_topic_dir
+
+        folder = tmp_path / "my-research-topic"
+        folder.mkdir()
+
+        topic, title, user_prompt, prompt_dir = _parse_topic_dir(folder)
+        assert topic == "my-research-topic"
+        assert title == "my-research-topic"
+        assert user_prompt is None
+
+    def test_parse_topic_dir_detects_prompts_subfolder(self, tmp_path):
+        from src.main import _parse_topic_dir
+
+        folder = tmp_path / "project"
+        folder.mkdir()
+        prompts_dir = folder / "prompts"
+        prompts_dir.mkdir()
+        (folder / "requirements.md").write_text("AI Research", encoding="utf-8")
+
+        topic, title, user_prompt, prompt_dir = _parse_topic_dir(folder)
+        assert prompt_dir == str(prompts_dir)
+
+    def test_parse_topic_dir_no_prompts_returns_none_prompt_dir(self, tmp_path):
+        from src.main import _parse_topic_dir
+
+        folder = tmp_path / "project"
+        folder.mkdir()
+        (folder / "requirements.md").write_text("AI Research", encoding="utf-8")
+
+        topic, title, user_prompt, prompt_dir = _parse_topic_dir(folder)
+        assert prompt_dir is None
+
+    def test_parse_topic_dir_title_is_folder_name(self, tmp_path):
+        from src.main import _parse_topic_dir
+
+        folder = tmp_path / "stock-trading"
+        folder.mkdir()
+        (folder / "requirements.md").write_text(
+            "## Topic\nStock Trading Strategies\n", encoding="utf-8"
+        )
+
+        topic, title, user_prompt, prompt_dir = _parse_topic_dir(folder)
+        assert title == "stock-trading"
+        assert topic == "Stock Trading Strategies"
+
+    # --- main() integration ---
+
+    def test_main_topic_dir_missing_folder_exits(self, tmp_path):
+        missing = tmp_path / "nonexistent"
+        with patch("sys.argv", ["prog", "--topic-dir", str(missing), "--duration", "1s"]):
+            with pytest.raises(SystemExit):
+                from src.main import main
+                main()
+
+    def test_main_topic_dir_creates_output_folder_and_passes_paths(
+        self, tmp_path, monkeypatch
+    ):
+        """main() creates <folder>/output/ and passes derived paths to run()."""
+        folder = tmp_path / "my-project"
+        folder.mkdir()
+        (folder / "requirements.md").write_text("AI Agents research", encoding="utf-8")
+
+        captured: dict = {}
+
+        async def fake_run(topic, duration_seconds, **kwargs):
+            captured["topic"] = topic
+            captured["reports_dir"] = kwargs.get("reports_dir")
+            captured["db_path"] = kwargs.get("db_path")
+            captured["task_json_path"] = kwargs.get("task_json_path")
+
+        monkeypatch.setattr("src.main.run", fake_run)
+
+        with patch("sys.argv", ["prog", "--topic-dir", str(folder), "--duration", "1s"]):
+            from src.main import main
+            main()
+
+        expected_output = folder / "output"
+        assert captured["reports_dir"] == str(expected_output / "reports")
+        assert captured["db_path"] == str(expected_output / "research.db")
+        assert captured["task_json_path"] == str(expected_output / "task.json")
+
+    def test_main_topic_dir_uses_prompts_subfolder(self, tmp_path, monkeypatch):
+        """When <folder>/prompts/ exists, main() passes it as prompt_dir."""
+        folder = tmp_path / "project"
+        folder.mkdir()
+        (folder / "requirements.md").write_text("Research topic", encoding="utf-8")
+        prompts_dir = folder / "prompts"
+        prompts_dir.mkdir()
+
+        captured: dict = {}
+
+        async def fake_run(topic, duration_seconds, **kwargs):
+            captured["prompt_dir"] = kwargs.get("prompt_dir")
+
+        monkeypatch.setattr("src.main.run", fake_run)
+
+        with patch("sys.argv", ["prog", "--topic-dir", str(folder), "--duration", "1s"]):
+            from src.main import main
+            main()
+
+        assert captured["prompt_dir"] == str(prompts_dir)
+
+    def test_main_topic_dir_prompt_dir_not_overridden_by_subfolder(
+        self, tmp_path, monkeypatch
+    ):
+        """Explicit --prompt-dir takes precedence over <folder>/prompts/."""
+        folder = tmp_path / "project"
+        folder.mkdir()
+        (folder / "requirements.md").write_text("Research topic", encoding="utf-8")
+        (folder / "prompts").mkdir()  # subfolder exists but should be ignored
+
+        captured: dict = {}
+
+        async def fake_run(topic, duration_seconds, **kwargs):
+            captured["prompt_dir"] = kwargs.get("prompt_dir")
+
+        monkeypatch.setattr("src.main.run", fake_run)
+
+        with patch(
+            "sys.argv",
+            [
+                "prog",
+                "--topic-dir", str(folder),
+                "--prompt-dir", "/my/custom/prompts",
+                "--duration", "1s",
+            ],
+        ):
+            from src.main import main
+            main()
+
+        assert captured["prompt_dir"] == "/my/custom/prompts"
+
+
+class TestTaskJsonPersistence:
+    """Tests for task.json auto-save and restore via run()."""
+
+    def test_run_passes_task_json_path_to_manager(self, event_loop, tmp_path):
+        """run() wires task_json_path into AgentManager."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from src.main import run
+
+        reports_dir = str(tmp_path / "reports")
+        db_path = str(tmp_path / "research.db")
+        task_file = str(tmp_path / "task.json")
+
+        mock_manager = MagicMock()
+        mock_manager.init = AsyncMock()
+        mock_manager.close = AsyncMock()
+        mock_manager.build_graph = AsyncMock()
+        mock_manager.has_graph_work = MagicMock(return_value=False)
+        mock_manager.has_tasks = MagicMock(return_value=False)
+        mock_manager.populate_queue = AsyncMock()
+        mock_manager.restore_task = MagicMock(return_value=False)
+        mock_manager.generate_report = MagicMock(return_value=tmp_path / "r.md")
+        mock_manager._graph = None
+        mock_manager.budget = MagicMock()
+        mock_manager.budget.is_exhausted = MagicMock(return_value=False)
+        mock_manager.budget.summary = MagicMock(return_value="ok")
+
+        captured_kwargs: dict = {}
+
+        def spy_init(**kwargs):
+            captured_kwargs.update(kwargs)
+            return mock_manager
+
+        with patch("src.main.AgentManager", side_effect=spy_init), \
+             patch("src.main._list_ollama_models", return_value=[]):
+            event_loop.run_until_complete(
+                run(
+                    topic="AI Agents",
+                    duration_seconds=1,
+                    reports_dir=reports_dir,
+                    db_path=db_path,
+                    task_json_path=task_file,
+                )
+            )
+
+        from pathlib import Path
+        assert captured_kwargs.get("task_json_path") == Path(task_file)
+
+    def test_run_restores_task_when_file_exists(self, event_loop, tmp_path):
+        """run() calls restore_task() when task_json_path points to an existing file."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from src.main import run
+
+        reports_dir = str(tmp_path / "reports")
+        db_path = str(tmp_path / "research.db")
+        task_file = tmp_path / "task.json"
+        task_file.write_text('{"version": 1, "status": "in_progress"}', encoding="utf-8")
+
+        mock_manager = MagicMock()
+        mock_manager.init = AsyncMock()
+        mock_manager.close = AsyncMock()
+        mock_manager.build_graph = AsyncMock()
+        mock_manager.has_graph_work = MagicMock(return_value=False)
+        mock_manager.has_tasks = MagicMock(return_value=False)
+        mock_manager.populate_queue = AsyncMock()
+        mock_manager.restore_task = MagicMock(return_value=True)
+        mock_manager.generate_report = MagicMock(return_value=tmp_path / "r.md")
+        mock_manager._graph = None
+        mock_manager.budget = MagicMock()
+        mock_manager.budget.is_exhausted = MagicMock(return_value=False)
+        mock_manager.budget.summary = MagicMock(return_value="ok")
+        mock_manager.save_task = MagicMock()
+
+        with patch("src.main.AgentManager", return_value=mock_manager), \
+             patch("src.main._list_ollama_models", return_value=[]):
+            event_loop.run_until_complete(
+                run(
+                    topic="AI Agents",
+                    duration_seconds=1,
+                    reports_dir=reports_dir,
+                    db_path=db_path,
+                    task_json_path=str(task_file),
+                )
+            )
+
+        # restore_task() should have been called with the path
+        mock_manager.restore_task.assert_called_once()
+        # build_graph() should NOT have been called when restore succeeds
+        mock_manager.build_graph.assert_not_called()
+
+    def test_run_builds_graph_when_no_saved_state(self, event_loop, tmp_path):
+        """run() calls build_graph() when task_json_path is absent."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from src.main import run
+
+        reports_dir = str(tmp_path / "reports")
+        db_path = str(tmp_path / "research.db")
+
+        mock_manager = MagicMock()
+        mock_manager.init = AsyncMock()
+        mock_manager.close = AsyncMock()
+        mock_manager.build_graph = AsyncMock()
+        mock_manager.has_graph_work = MagicMock(return_value=False)
+        mock_manager.has_tasks = MagicMock(return_value=False)
+        mock_manager.populate_queue = AsyncMock()
+        mock_manager.restore_task = MagicMock(return_value=False)
+        mock_manager.generate_report = MagicMock(return_value=tmp_path / "r.md")
+        mock_manager._graph = None
+        mock_manager.budget = MagicMock()
+        mock_manager.budget.is_exhausted = MagicMock(return_value=False)
+        mock_manager.budget.summary = MagicMock(return_value="ok")
+        mock_manager.save_task = MagicMock()
+
+        with patch("src.main.AgentManager", return_value=mock_manager), \
+             patch("src.main._list_ollama_models", return_value=[]):
+            event_loop.run_until_complete(
+                run(
+                    topic="AI Agents",
+                    duration_seconds=1,
+                    reports_dir=reports_dir,
+                    db_path=db_path,
+                    task_json_path=None,
+                )
+            )
+
+        # restore_task() should NOT be called (no task_json_path)
+        mock_manager.restore_task.assert_not_called()
+        mock_manager.build_graph.assert_called_once()
