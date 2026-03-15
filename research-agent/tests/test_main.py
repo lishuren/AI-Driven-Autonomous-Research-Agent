@@ -234,7 +234,7 @@ class TestBudgetArgs:
 
 
 class TestScrapingArgs:
-    """Tests for --respect-robots, --no-respect-robots, --no-scrape CLI args."""
+    """Tests for the --respect-robots CLI arg."""
 
     def _parse(self, extra_args: list[str]) -> argparse.Namespace:
         from src.main import _parse_args
@@ -242,25 +242,13 @@ class TestScrapingArgs:
         with patch("sys.argv", ["prog", "--topic", "Test"] + extra_args):
             return _parse_args()
 
-    def test_respect_robots_default_none(self):
+    def test_respect_robots_default_false(self):
         args = self._parse([])
-        assert args.respect_robots is None
+        assert args.respect_robots is False
 
     def test_respect_robots_flag(self):
         args = self._parse(["--respect-robots"])
         assert args.respect_robots is True
-
-    def test_no_respect_robots_flag(self):
-        args = self._parse(["--no-respect-robots"])
-        assert args.no_respect_robots is True
-
-    def test_no_scrape_default_false(self):
-        args = self._parse([])
-        assert args.no_scrape is False
-
-    def test_no_scrape_flag(self):
-        args = self._parse(["--no-scrape"])
-        assert args.no_scrape is True
 
 
 class TestBudgetEnvFallback:
@@ -293,11 +281,6 @@ class TestBudgetEnvFallback:
         val = os.environ.get("RESEARCH_MAX_CREDITS", "").strip()
         assert float(val) == 3.5
 
-    def test_no_scrape_env_fallback(self, monkeypatch):
-        monkeypatch.setenv("RESEARCH_NO_SCRAPE", "true")
-        val = os.environ.get("RESEARCH_NO_SCRAPE", "").strip().lower()
-        assert val in ("1", "true", "yes")
-
     def test_respect_robots_env_bool_parsing(self, monkeypatch):
         """Verify the _bool_env logic for RESEARCH_RESPECT_ROBOTS."""
         for true_val in ("1", "true", "yes", "True", "YES"):
@@ -309,9 +292,6 @@ class TestBudgetEnvFallback:
             monkeypatch.setenv("RESEARCH_RESPECT_ROBOTS", false_val)
             raw = os.environ.get("RESEARCH_RESPECT_ROBOTS", "").strip().lower()
             assert raw in ("0", "false", "no")
-
-
-class TestTavilyKeyArg:
     """Tests for --tavily-key CLI argument."""
 
     def _parse(self, extra_args: list[str]) -> argparse.Namespace:
@@ -561,19 +541,6 @@ class TestDryRunArgs:
     def test_dry_run_flag(self):
         args = self._parse(["--dry-run"])
         assert args.dry_run is True
-
-    def test_estimate_credits_default_false(self):
-        args = self._parse([])
-        assert args.estimate_credits is False
-
-    def test_estimate_credits_flag(self):
-        args = self._parse(["--estimate-credits"])
-        assert args.estimate_credits is True
-
-    def test_dry_run_and_estimate_credits_mutually_exclusive(self):
-        """--dry-run and --estimate-credits cannot be used together."""
-        with pytest.raises(SystemExit):
-            self._parse(["--dry-run", "--estimate-credits"])
 
     def test_warn_credits_default(self):
         args = self._parse([])

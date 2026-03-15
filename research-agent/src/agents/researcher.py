@@ -17,6 +17,10 @@ from typing import Any, Optional
 
 from src.llm_client import generate_text
 from src.prompt_loader import load_prompt
+from src.tools.hub_scraper_tool import (
+    fetch_hub_detail,
+    is_hub_url,
+)
 from src.tools.scraper_tool import ScraperTool
 from src.tools.search_tool import SearchTool, _detect_language
 
@@ -76,6 +80,14 @@ class ResearcherAgent:
 
         Returns a dict with keys: ``subtopic``, ``query``, ``summary``,
         ``source_urls``, ``raw_content``.
+
+        When Scrapling is installed, URLs still unresolved after Tavily
+        Extract are classified as hub/index pages.
+        Hub-like URLs are fetched with Scrapling, the best same-domain detail
+        link is followed, and the resulting content is merged into
+        ``raw_content``.  Both the hub URL and the followed detail URL appear
+        in ``source_urls``.  Non-hub or unresolvable hub URLs continue to the
+        existing Playwright fallback path.
         """
         query: str = task.get("query", task.get("subtopic", ""))
         subtopic: str = task.get("subtopic", query)
@@ -134,7 +146,50 @@ class ResearcherAgent:
             except Exception as exc:
                 logger.warning("Tavily Extract failed: %s", exc)
 
-        # 2c. Fall back to Playwright for remaining URLs
+        # 2c. Optional Scrapling hub-page path
+        # Classify remaining URLs; hub-like ones enter fetch_hub_detail which
+        # follows one best same-domain detail link.  Non-hub URLs and any hub
+        # URLs where fetch_hub_detail returns (None, None) fall through to the
+        # Playwright path unchanged.
+        if urls_needing_content:
+            result_by_url = {r.get("url", ""): r for r in results if r.get("url")}
+            hub_urls: list[str] = []
+            non_hub_urls: list[str] = []
+            for _u in urls_needing_content:
+                _r = result_by_url.get(_u, {})
+                if is_hub_url(_u, _r.get("title", ""), _r.get("body", "")):
+                    hub_urls.append(_u)
+                else:
+                    non_hub_urls.append(_u)
+
+            if hub_urls:
+                hub_results = await asyncio.gather(
+                    *[fetch_hub_detail(u, query) for u in hub_urls],
+                    return_exceptions=True,
+                )
+                resolved_hub: set[str] = set()
+                for hub_url, hub_result in zip(hub_urls, hub_results):
+                    if (
+                        isinstance(hub_result, tuple)
+                        and hub_result[0] is not None
+                        and hub_result[1] is not None
+                    ):
+                        detail_url, detail_text = hub_result
+                        source_urls.append(hub_url)
+                        source_urls.append(detail_url)
+                        raw_parts.append(
+                            f"--- Source: {hub_url} (hub) → {detail_url} ---\n"
+                            f"{detail_text[:_PER_PAGE_CAP]}"
+                        )
+                        resolved_hub.add(hub_url)
+                # Unresolved hub URLs fall through to Playwright
+                urls_needing_content = non_hub_urls + [
+                    u for u in hub_urls if u not in resolved_hub
+                ]
+            else:
+                urls_needing_content = non_hub_urls
+
+        # 2d. Fall back to Playwright for remaining URLs
         if urls_needing_content:
             scrape_tasks = [self._scraper.scrape(url) for url in urls_needing_content]
             scraped = await asyncio.gather(*scrape_tasks, return_exceptions=True)

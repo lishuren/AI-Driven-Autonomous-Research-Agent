@@ -377,38 +377,17 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--respect-robots",
         action="store_true",
-        default=None,
-        help="Enable advisory robots.txt checks before Playwright scraping. "
-             "Env: RESEARCH_RESPECT_ROBOTS (default: True).",
-    )
-    parser.add_argument(
-        "--no-respect-robots",
-        action="store_true",
         default=False,
-        help="Disable advisory robots.txt checks.",
-    )
-    parser.add_argument(
-        "--no-scrape",
-        action="store_true",
-        default=False,
-        help="Disable Playwright scraping entirely. Content will come from "
-             "Tavily raw_content and Extract only. "
-             "Env: RESEARCH_NO_SCRAPE.",
+        help="Enable advisory robots.txt checks before Playwright scraping "
+             "(default: off). Env: RESEARCH_RESPECT_ROBOTS.",
     )
     # Dry-run and credit estimation
-    dry_run_group = parser.add_mutually_exclusive_group()
-    dry_run_group.add_argument(
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         default=False,
         help="Run planner decompositions to build the topic graph without executing "
              "any Tavily searches, then print an estimated credit cost and exit.",
-    )
-    dry_run_group.add_argument(
-        "--estimate-credits",
-        action="store_true",
-        default=False,
-        help="Alias for --dry-run.  Builds the graph and prints a credit estimate.",
     )
     parser.add_argument(
         "--warn-credits",
@@ -884,7 +863,7 @@ def main() -> None:
     args = _parse_args()
 
     # Dry-run / estimate-credits mode — no searches, just decompose & count nodes
-    is_dry_run = args.dry_run or args.estimate_credits
+    is_dry_run = args.dry_run
 
     if args.duration is not None:
         duration = args.duration
@@ -974,7 +953,7 @@ def main() -> None:
     warn_threshold = args.warn_credits
 
     # Resolve scraping flags (CLI → env → default)
-    from src.tools.scraper_tool import set_respect_robots, set_no_scrape
+    from src.tools.scraper_tool import set_respect_robots
 
     def _bool_env(name: str, default: bool) -> bool:
         val = os.environ.get(name, "").strip().lower()
@@ -984,17 +963,8 @@ def main() -> None:
             return False
         return default
 
-    if args.no_respect_robots:
-        set_respect_robots(False)
-    elif args.respect_robots is not None:
+    if args.respect_robots or _bool_env("RESEARCH_RESPECT_ROBOTS", False):
         set_respect_robots(True)
-    else:
-        set_respect_robots(_bool_env("RESEARCH_RESPECT_ROBOTS", True))
-
-    no_scrape = args.no_scrape or _bool_env("RESEARCH_NO_SCRAPE", False)
-    if no_scrape:
-        set_no_scrape(True)
-        logger.info("Playwright scraping disabled (--no-scrape).")
 
     # Dry-run path — estimate credits without running any real searches
     if is_dry_run:

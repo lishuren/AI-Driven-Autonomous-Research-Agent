@@ -16,15 +16,9 @@ import urllib.parse
 import urllib.robotparser
 from typing import Optional
 
-logger = logging.getLogger(__name__)
+from playwright.async_api import async_playwright
 
-# Try to import Playwright; scraping is gracefully disabled when missing.
-try:
-    from playwright.async_api import async_playwright
-    _HAS_PLAYWRIGHT = True
-except ImportError:  # pragma: no cover
-    _HAS_PLAYWRIGHT = False
-    logger.info("Playwright not installed — Playwright scraping disabled.")
+logger = logging.getLogger(__name__)
 
 _PAGE_TIMEOUT = 15_000  # milliseconds — fail fast on blocked/slow sites
 _MAX_CONTENT_CHARS = 20_000
@@ -44,11 +38,8 @@ _USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
 ]
 
-# Module-level flag — set via set_respect_robots()
-_respect_robots: bool = True
-
-# Module-level flag — set via set_no_scrape()
-_no_scrape: bool = False
+# Module-level flag — set via set_respect_robots(); default False (opt-in)
+_respect_robots: bool = False
 
 # Cache robots.txt parsers per domain to avoid re-fetching
 _robots_cache: dict[str, Optional[urllib.robotparser.RobotFileParser]] = {}
@@ -58,12 +49,6 @@ def set_respect_robots(enabled: bool) -> None:
     """Enable or disable the robots.txt advisory check."""
     global _respect_robots
     _respect_robots = enabled
-
-
-def set_no_scrape(enabled: bool) -> None:
-    """Globally disable Playwright scraping when True."""
-    global _no_scrape
-    _no_scrape = enabled
 
 
 def _check_robots_txt(url: str) -> bool:
@@ -130,15 +115,8 @@ class ScraperTool:
         """Fetch *url*, wait for JS rendering, and return plain-text content.
 
         Retries on transient network failures with exponential backoff.
-        Returns *None* when Playwright is not installed, on permanent
-        failures, or when max retries are exceeded.
+        Returns *None* on permanent failures or when max retries are exceeded.
         """
-        if not _HAS_PLAYWRIGHT:
-            return None
-
-        if _no_scrape:
-            return None
-
         # Advisory robots.txt check
         _check_robots_txt(url)
 

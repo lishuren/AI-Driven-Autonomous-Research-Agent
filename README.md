@@ -124,8 +124,6 @@ python -m src.main --topic "Reinforcement Learning" --duration 30m \
 
 # Dry-run: build topic graph and estimate Tavily credit cost — no real searches
 python -m src.main --topic "Machine Learning" --dry-run
-# or equivalently:
-python -m src.main --topic "Machine Learning" --estimate-credits
 
 # Cap credit spend and warn when 70% of budget is consumed
 python -m src.main --topic "Blockchain" --max-credits-spend 50 --warn-credits 0.70
@@ -296,11 +294,8 @@ back-testing methodology, and known pitfalls.
 | `--warn-credits` | `0.80` | Warn (log) when this fraction of any budget limit is consumed. Set to `1.0` to silence warnings. |
 | **Dry-run / estimation** | | |
 | `--dry-run` | `False` | Build the topic graph with LLM only (no Tavily searches), print a credit cost estimate, and exit. |
-| `--estimate-credits` | `False` | Alias for `--dry-run`. |
 | **Scraping controls** | | |
-| `--respect-robots` | `True` | Honour advisory `robots.txt` checks before scraping |
-| `--no-respect-robots` | — | Disable `robots.txt` advisory checks |
-| `--no-scrape` | `False` | Disable Playwright entirely; content comes from Tavily only |
+| `--respect-robots` | `False` | Opt in to advisory `robots.txt` checks before scraping |
 
 \* Exactly one of `--topic`, `--requirements-file`, or `--topic-dir` is required.
 
@@ -318,8 +313,10 @@ Budget and scraping flags also read from environment variables when not passed o
 | `--max-queries` | `RESEARCH_MAX_QUERIES` | unlimited |
 | `--max-nodes` | `RESEARCH_MAX_NODES` | unlimited |
 | `--max-credits-spend` | `RESEARCH_MAX_CREDITS` | unlimited |
-| `--respect-robots` | `RESEARCH_RESPECT_ROBOTS` | `True` |
-| `--no-scrape` | `RESEARCH_NO_SCRAPE` | `False` |
+| `--respect-robots` | `RESEARCH_RESPECT_ROBOTS` | `False` |
+
+All variables can be placed in a `research-agent/.env` file (copied from
+`research-agent/.env.example`) rather than exported as shell variables.
 
 #### Prompt Templates
 

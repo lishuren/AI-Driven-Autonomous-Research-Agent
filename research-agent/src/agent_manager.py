@@ -26,6 +26,7 @@ from src.agents.researcher import ResearcherAgent
 from src.budget import BudgetTracker
 from src.database.knowledge_base import KnowledgeBase
 from src.tools.search_tool import SearchTool, set_budget
+from src.tools.hub_scraper_tool import set_budget as set_hub_budget
 from src.topic_graph import TopicGraph, TopicNode, MAX_DEPTH
 
 logger = logging.getLogger(__name__)
@@ -134,6 +135,7 @@ class AgentManager:
             warn_threshold=warn_threshold,
         )
         set_budget(self.budget)
+        set_hub_budget(self.budget)
 
         # Phase 1 — pass SearchTool to Planner for pre-search vocabulary grounding
         _search_tool = SearchTool(max_results=3)

@@ -102,14 +102,27 @@ python -m src.main --topic "Stock Trading Strategies" --duration 10m \
 ## 6. Set up your Tavily API key
 
 The agent uses **Tavily** for web search.  Get a free API key at
-[app.tavily.com](https://app.tavily.com) (free tier: 1,000 credits/month) and
-export it before running:
+[app.tavily.com](https://app.tavily.com) (free tier: 1,000 credits/month).
+
+### Option A: `.env` file (recommended)
+
+```bash
+cd research-agent
+cp .env.example .env
+# Edit .env and replace the placeholder with your real key:
+# TAVILY_API_KEY=tvly-YOUR-API-KEY-HERE
+```
+
+The agent and `check_tavily_usage.py` both load `research-agent/.env`
+automatically — no `export` needed.
+
+### Option B: Shell export
 
 ```bash
 export TAVILY_API_KEY="tvly-YOUR-API-KEY-HERE"
 ```
 
-Or pass it inline:
+### Option C: Inline CLI flag
 
 ```bash
 python -m src.main --topic "..." --tavily-key tvly-YOUR-API-KEY-HERE
@@ -314,14 +327,12 @@ python -m src.main --topic "World Extraction Service" --duration 1h --max-depth 
 
 ## Estimating costs before running
 
-Before committing to a full research run, use `--dry-run` (or the equivalent
-`--estimate-credits`) to build the topic graph with the LLM only — **no Tavily
-searches are executed** — and print an estimated credit cost:
+Before committing to a full research run, use `--dry-run` to build the topic
+graph with the LLM only — **no Tavily searches are executed** — and print an
+estimated credit cost:
 
 ```bash
 python -m src.main --topic "Quantum Computing" --dry-run
-# or
-python -m src.main --topic "Quantum Computing" --estimate-credits
 ```
 
 Example output:
@@ -379,19 +390,15 @@ made, and nodes created.
 ## Scraping controls
 
 ```bash
-# Disable Playwright entirely (content from Tavily only, no browser required)
-python -m src.main --topic "AI Safety" --no-scrape
-
-# Disable robots.txt advisory checks (scraping still works, just skips the check)
-python -m src.main --topic "AI Safety" --no-respect-robots
+# Opt in to robots.txt advisory checks before scraping
+python -m src.main --topic "AI Safety" --respect-robots
 ```
 
-These also have environment variable equivalents:
+Environment variable equivalent:
 
 | CLI flag | Environment variable | Default |
-|----------|---------------------|---------|
-| `--no-scrape` | `RESEARCH_NO_SCRAPE` | `False` |
-| `--respect-robots` / `--no-respect-robots` | `RESEARCH_RESPECT_ROBOTS` | `True` |
+|----------|---------------------|--------|
+| `--respect-robots` | `RESEARCH_RESPECT_ROBOTS` | `False` |
 
 ## Model Guide: How to Specify and Choose a Model
 

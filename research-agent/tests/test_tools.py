@@ -439,17 +439,7 @@ class TestLanguageDetection:
 class TestScraperFlags:
     def teardown_method(self):
         import src.tools.scraper_tool as sc_mod
-        sc_mod._no_scrape = False
-        sc_mod._respect_robots = True
-
-    def test_no_scrape_returns_none(self, event_loop):
-        """When _no_scrape is True, scrape should return None immediately."""
-        from src.tools.scraper_tool import ScraperTool, set_no_scrape
-        set_no_scrape(True)
-
-        tool = ScraperTool()
-        result = event_loop.run_until_complete(tool.scrape("https://example.com"))
-        assert result is None
+        sc_mod._respect_robots = False
 
     def test_check_robots_txt_allows(self):
         """robots.txt check should return True when allowed."""
@@ -461,7 +451,7 @@ class TestScraperFlags:
             assert _check_robots_txt("https://example.com/page") is True
 
     def test_check_robots_txt_disabled(self):
-        """When respect_robots is False, always returns True."""
+        """When respect_robots is False (default), always returns True."""
         from src.tools.scraper_tool import _check_robots_txt, set_respect_robots
         set_respect_robots(False)
         assert _check_robots_txt("https://example.com/page") is True
