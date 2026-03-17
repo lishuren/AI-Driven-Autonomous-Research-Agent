@@ -12,11 +12,14 @@ Need a complete setup walkthrough from checkout to first query? See
 ```
 research-agent/
 ├── prompts/                 # Customisable prompt templates
+├── config/
+│   └── filters.json         # Bundled filter config (stopwords, hub patterns, etc.)
 ├── src/
 │   ├── main.py              # Entry point – async loop controller
 │   ├── agent_manager.py     # Orchestrates Planner / Researcher / Critic
 │   ├── llm_client.py        # Ollama + OpenAI-compatible LLM wrapper
 │   ├── prompt_loader.py     # Prompt template loader with override support
+│   ├── config_loader.py     # Filter config loader with per-task override support
 │   ├── budget.py            # Per-session BudgetTracker (queries, nodes, credits)
 │   ├── topic_graph.py       # TopicNode / TopicGraph DAG for hierarchical research
 │   ├── agents/
@@ -48,25 +51,6 @@ check for algorithms and library dependencies; general topics focus on accuracy
 and clarity.  If any check fails, the system generates a more specific
 follow-up query and retries automatically (up to 3 retries) — it never accepts
 vague summaries.
-
-## Quick Start
-
-### 1. Prerequisites
-
-* Python 3.10+
-* Either:
-  * [Ollama](https://ollama.ai/) running locally (`ollama serve`), or
-  * an OpenAI-compatible online LLM endpoint such as [SiliconFlow](https://www.siliconflowcn.com/)
-* A model available from your chosen provider
-* **Tavily API key** — set `TAVILY_API_KEY` in your environment or pass `--tavily-key`. Sign up at [tavily.com](https://tavily.com) (free tier: 1,000 credits/month)
-
-To check your current credit balance and usage history at any time:
-
-```bash
-python3 research-agent/check_tavily_usage.py
-```
-
-This reads `TAVILY_API_KEY` from the environment or from `research-agent/.env`, shows plan name, credits used/remaining, a per-type breakdown (Search / Extract / Crawl), and a local history table that accumulates across runs.
 
 ## Quick Start
 
@@ -188,6 +172,8 @@ my-research/
 ├── requirements.md      ← topic file (or topic.md, or any .md)
 ├── prompts/             ← optional: prompt template overrides
 │   └── planner_decompose.md
+├── config/              ← optional: filter config overrides
+│   └── filters.json
 └── output/              ← auto-created on first run
     ├── reports/         ← generated Markdown reports + JSON trees
     ├── research.db      ← SQLite knowledge base
@@ -218,6 +204,10 @@ python -m src.main --topic-dir ./my-research/ --duration 2h
 The `prompts/` subfolder, when present, is automatically used as `--prompt-dir`.
 An explicit `--prompt-dir` on the CLI always takes precedence over the folder's
 `prompts/` subfolder.
+
+The `config/` subfolder, when present, is automatically used as `--config-dir` to
+override filter settings (stopwords, filler words, hub patterns, etc.).  An
+explicit `--config-dir` on the CLI always takes precedence.
 
 #### Crash Recovery / Progress Persistence (`task.json`)
 
@@ -281,6 +271,7 @@ back-testing methodology, and known pitfalls.
 | `--llm-api-key` | — | API key for OpenAI-compatible online providers |
 | `--ollama-url` | `http://localhost:11434` | Ollama base URL when `--llm-provider=ollama` |
 | `--prompt-dir` | bundled prompts | Directory containing prompt template overrides |
+| `--config-dir` | — | Directory containing a `filters.json` that overrides bundled filter defaults (stopwords, filler words, hub patterns, etc.) |
 | `--tavily-key` | *(env `TAVILY_API_KEY`)* | Tavily API key for web search |
 | `--data-dir` | — | Base data directory; overrides `--reports-dir`, `--db-path`, and `--search-log` defaults; also enables `task.json` persistence |
 | `--reports-dir` | `data/reports` | Output directory for Markdown reports |
@@ -310,6 +301,7 @@ Budget and scraping flags also read from environment variables when not passed o
 | `--llm-url` | `RESEARCH_LLM_URL` | provider-specific |
 | `--llm-api-key` | `RESEARCH_LLM_API_KEY` / `SILICONFLOW_API_KEY` | — |
 | `--prompt-dir` | `RESEARCH_PROMPT_DIR` | bundled prompts |
+| `--config-dir` | `RESEARCH_CONFIG_DIR` | — |
 | `--max-queries` | `RESEARCH_MAX_QUERIES` | unlimited |
 | `--max-nodes` | `RESEARCH_MAX_NODES` | unlimited |
 | `--max-credits-spend` | `RESEARCH_MAX_CREDITS` | unlimited |
@@ -331,6 +323,25 @@ python -m src.main --topic "AI Safety" --prompt-dir /tmp/my-prompts
 
 Only the `.md` prompt files you override need to exist in your custom
 directory; missing files fall back to the bundled defaults.
+
+#### Filter Configuration
+
+Bundled filter settings (stopwords, filler words, CAPTCHA URL markers, hub
+page patterns, and link exclusions) live in `research-agent/config/filters.json`.
+To override specific settings for a particular run, copy the file to a custom
+directory and pass that path on the CLI:
+
+```bash
+cp -R research-agent/config /tmp/my-config
+# Edit /tmp/my-config/filters.json — only the keys you change need to be present
+python -m src.main --topic "AI Safety" --config-dir /tmp/my-config
+```
+
+Only the keys present in your override file are merged on top of the bundled
+defaults; all other keys retain their bundled values.
+
+When using `--topic-dir`, place a `config/filters.json` inside the topic folder
+for automatic per-task filter customization — no extra CLI flag needed.
 
 ## Output Format
 
