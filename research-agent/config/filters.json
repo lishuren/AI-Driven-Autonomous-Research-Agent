@@ -1,0 +1,73 @@
+{
+  "_comment": "Functional filter configuration for the research agent. Copy this file into your topic directory's config/ subfolder and modify any section to override the defaults.",
+
+  "stopwords": [
+    "a", "an", "the", "and", "or", "of", "in", "to", "for", "with",
+    "on", "at", "by", "from", "is", "are", "was", "be", "as", "it",
+    "its", "this", "that", "how", "what", "which", "who", "s"
+  ],
+
+  "filler_words": [
+    "detailed", "detail", "comprehensive", "in-depth", "indepth",
+    "quality", "authoritative", "scholarly", "academic", "advanced",
+    "expert", "analytical", "analysis", "narrative", "elements",
+    "architectural", "thematic", "contextual", "technological",
+    "mechanisms", "paradigm", "strategies", "exploration", "overview",
+    "framework", "implementation", "foundational", "fundamental",
+    "examination", "investigation", "perspective", "aspects",
+    "concepts", "principles", "dynamics", "insights", "approach",
+    "methodology", "techniques", "components", "structure",
+    "from", "research", "sources", "authoritative", "source",
+    "study", "guide", "deeper", "understanding"
+  ],
+
+  "allowed_query_helpers": [
+    "season", "episode", "cast", "plot", "characters", "summary",
+    "review", "release", "explained", "how", "why", "list", "vs",
+    "history", "tutorial", "formula", "algorithm", "code",
+    "example", "python", "date", "trailer", "ending", "finale",
+    "recap", "explained", "wiki", "imdb", "rating", "s3", "s4"
+  ],
+
+  "captcha_url_markers": [
+    "showcaptcha",
+    "/captcha",
+    "?captcha",
+    "&captcha",
+    "validatecaptcha",
+    "robot",
+    "challenge"
+  ],
+
+  "transient_error_keywords": [
+    "timeout", "connection", "refused", "reset",
+    "temporarily unavailable", "dns", "econnreset"
+  ],
+
+  "permanent_error_keywords": [
+    "404", "403", "401", "not found", "forbidden", "unauthorized",
+    "net::err_invalid_url", "net::err_file_not_found"
+  ],
+
+  "hub_path_segments": [
+    "index", "category", "categories", "archive", "archives",
+    "tag", "tags", "topics", "topic", "search", "results",
+    "directory", "listing", "listings", "feed", "feeds",
+    "hub", "sitemap", "overview", "explore", "browse",
+    "news"
+  ],
+
+  "hub_title_keywords": [
+    "index", "category", "categories", "archive", "archives",
+    "tag", "directory", "search results", "latest", "all posts",
+    "recent posts", "overview", "browse", "topics", "listing",
+    "sitemap", "home page", "homepage"
+  ],
+
+  "link_exclude_substrings": [
+    "login", "signin", "sign-in", "signup", "sign-up", "register",
+    "logout", "account", "profile", "privacy", "terms", "cookie",
+    "advertise", "about", "contact", "careers", "sitemap",
+    "javascript:", "mailto:", "#"
+  ]
+}

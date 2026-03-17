@@ -27,6 +27,8 @@ from typing import TYPE_CHECKING, Any, Optional
 if TYPE_CHECKING:
     from src.budget import BudgetTracker
 
+from src.config_loader import get_filters_config
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -48,31 +50,8 @@ _budget: Optional["BudgetTracker"] = None
 _MAX_HUB_CONTENT_CHARS = 20_000
 
 # ---------------------------------------------------------------------------
-# Hub-page heuristics
+# Hub-page heuristics (values loaded from config/filters.json at runtime)
 # ---------------------------------------------------------------------------
-
-_HUB_PATH_SEGMENTS = frozenset({
-    "index", "category", "categories", "archive", "archives",
-    "tag", "tags", "topics", "topic", "search", "results",
-    "directory", "listing", "listings", "feed", "feeds",
-    "hub", "sitemap", "overview", "explore", "browse",
-    "news",  # root /news/ is typically a hub
-})
-
-_HUB_TITLE_KEYWORDS = frozenset({
-    "index", "category", "categories", "archive", "archives",
-    "tag", "directory", "search results", "latest", "all posts",
-    "recent posts", "overview", "browse", "topics", "listing",
-    "sitemap", "home page", "homepage",
-})
-
-# Anchor hrefs containing any of these are navigation noise, not content
-_LINK_EXCLUDE_SUBSTRINGS = frozenset({
-    "login", "signin", "sign-in", "signup", "sign-up", "register",
-    "logout", "account", "profile", "privacy", "terms", "cookie",
-    "advertise", "about", "contact", "careers", "sitemap",
-    "javascript:", "mailto:", "#",
-})
 
 
 def set_budget(budget: "BudgetTracker") -> None:
@@ -91,7 +70,7 @@ def is_hub_url(url: str, title: str = "", snippet: str = "") -> bool:
     path_parts = {p for p in parsed.path.split("/") if p}
 
     # URL path segment match
-    if path_parts & _HUB_PATH_SEGMENTS:
+    if path_parts & get_filters_config()["hub_path_segments"]:
         return True
 
     # Root domain with no significant path → homepage / hub
@@ -100,7 +79,7 @@ def is_hub_url(url: str, title: str = "", snippet: str = "") -> bool:
 
     # Title keyword match
     title_lower = title.lower()
-    if any(kw in title_lower for kw in _HUB_TITLE_KEYWORDS):
+    if any(kw in title_lower for kw in get_filters_config()["hub_title_keywords"]):
         return True
 
     return False
@@ -173,7 +152,7 @@ def _fetch_hub_detail_sync(
 
         # Exclude navigation / account noise
         href_lower = resolved.lower()
-        if any(excl in href_lower for excl in _LINK_EXCLUDE_SUBSTRINGS):
+        if any(excl in href_lower for excl in get_filters_config()["link_exclude_substrings"]):
             continue
 
         # Do not loop back to the hub page itself

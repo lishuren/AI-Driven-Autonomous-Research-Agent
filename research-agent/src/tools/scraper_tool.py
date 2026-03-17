@@ -18,6 +18,8 @@ from typing import Optional
 
 from playwright.async_api import async_playwright
 
+from src.config_loader import get_filters_config
+
 logger = logging.getLogger(__name__)
 
 _PAGE_TIMEOUT = 15_000  # milliseconds — fail fast on blocked/slow sites
@@ -85,24 +87,15 @@ def _check_robots_txt(url: str) -> bool:
 def _is_transient_scrape_error(exc: Exception) -> bool:
     """Determine if a Playwright error is transient (retry-worthy) or permanent."""
     error_str = str(exc).lower()
-    
-    # Transient errors
-    transient_keywords = {
-        "timeout", "connection", "refused", "reset",
-        "temporarily unavailable", "dns", "econnreset",
-    }
-    
-    # Permanent errors
-    permanent_keywords = {
-        "404", "403", "401", "not found", "forbidden", "unauthorized",
-        "net::err_invalid_url", "net::err_file_not_found",
-    }
-    
+    cfg = get_filters_config()
+    transient_keywords = cfg["transient_error_keywords"]
+    permanent_keywords = cfg["permanent_error_keywords"]
+
     if any(kw in error_str for kw in permanent_keywords):
         return False
     if any(kw in error_str for kw in transient_keywords):
         return True
-    
+
     # Check exception type
     transient_types = (ConnectionError, TimeoutError, OSError)
     return isinstance(exc, transient_types)
