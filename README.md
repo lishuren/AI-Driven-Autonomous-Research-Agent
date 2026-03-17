@@ -71,25 +71,6 @@ python3 research-agent/check_tavily_usage.py
 
 This reads `TAVILY_API_KEY` from the environment or from `research-agent/.env`, shows plan name, credits used/remaining, a per-type breakdown (Search / Extract / Crawl), and a local history table that accumulates across runs.
 
-## Quick Start
-
-### 1. Prerequisites
-
-* Python 3.10+
-* Either:
-  * [Ollama](https://ollama.ai/) running locally (`ollama serve`), or
-  * an OpenAI-compatible online LLM endpoint such as [SiliconFlow](https://www.siliconflowcn.com/)
-* A model available from your chosen provider
-* **Tavily API key** — set `TAVILY_API_KEY` in your environment or pass `--tavily-key`. Sign up at [tavily.com](https://tavily.com) (free tier: 1,000 credits/month)
-
-To check your current credit balance and usage history at any time:
-
-```bash
-python3 research-agent/check_tavily_usage.py
-```
-
-This reads `TAVILY_API_KEY` from the environment or from `research-agent/.env`, shows plan name, credits used/remaining, a per-type breakdown (Search / Extract / Crawl), and a local history table that accumulates across runs.
-
 ### 2. Install
 
 ```bash
