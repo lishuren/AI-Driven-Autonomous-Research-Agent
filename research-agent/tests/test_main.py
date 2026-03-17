@@ -727,10 +727,11 @@ class TestTopicDir:
         folder.mkdir()
         (folder / "requirements.md").write_text("## Topic\nAI Agents\n", encoding="utf-8")
 
-        topic, title, user_prompt, prompt_dir = _parse_topic_dir(folder)
+        topic, title, user_prompt, prompt_dir, config_dir = _parse_topic_dir(folder)
         assert topic == "AI Agents"
         assert title == "project"
         assert prompt_dir is None
+        assert config_dir is None
 
     def test_parse_topic_dir_uses_topic_md_over_other_md(self, tmp_path):
         from src.main import _parse_topic_dir
@@ -740,7 +741,7 @@ class TestTopicDir:
         (folder / "topic.md").write_text("## Topic\nML Research\n", encoding="utf-8")
         (folder / "other.md").write_text("## Topic\nUnrelated\n", encoding="utf-8")
 
-        topic, title, user_prompt, prompt_dir = _parse_topic_dir(folder)
+        topic, title, user_prompt, prompt_dir, config_dir = _parse_topic_dir(folder)
         assert topic == "ML Research"
 
     def test_parse_topic_dir_falls_back_to_first_md(self, tmp_path):
@@ -750,7 +751,7 @@ class TestTopicDir:
         folder.mkdir()
         (folder / "analysis.md").write_text("## Topic\nMarket Research\n", encoding="utf-8")
 
-        topic, title, user_prompt, prompt_dir = _parse_topic_dir(folder)
+        topic, title, user_prompt, prompt_dir, config_dir = _parse_topic_dir(folder)
         assert topic == "Market Research"
 
     def test_parse_topic_dir_falls_back_to_folder_name(self, tmp_path):
@@ -759,10 +760,11 @@ class TestTopicDir:
         folder = tmp_path / "my-research-topic"
         folder.mkdir()
 
-        topic, title, user_prompt, prompt_dir = _parse_topic_dir(folder)
+        topic, title, user_prompt, prompt_dir, config_dir = _parse_topic_dir(folder)
         assert topic == "my-research-topic"
         assert title == "my-research-topic"
         assert user_prompt is None
+        assert config_dir is None
 
     def test_parse_topic_dir_detects_prompts_subfolder(self, tmp_path):
         from src.main import _parse_topic_dir
@@ -773,7 +775,7 @@ class TestTopicDir:
         prompts_dir.mkdir()
         (folder / "requirements.md").write_text("AI Research", encoding="utf-8")
 
-        topic, title, user_prompt, prompt_dir = _parse_topic_dir(folder)
+        topic, title, user_prompt, prompt_dir, config_dir = _parse_topic_dir(folder)
         assert prompt_dir == str(prompts_dir)
 
     def test_parse_topic_dir_no_prompts_returns_none_prompt_dir(self, tmp_path):
@@ -783,8 +785,30 @@ class TestTopicDir:
         folder.mkdir()
         (folder / "requirements.md").write_text("AI Research", encoding="utf-8")
 
-        topic, title, user_prompt, prompt_dir = _parse_topic_dir(folder)
+        topic, title, user_prompt, prompt_dir, config_dir = _parse_topic_dir(folder)
         assert prompt_dir is None
+
+    def test_parse_topic_dir_detects_config_subfolder(self, tmp_path):
+        from src.main import _parse_topic_dir
+
+        folder = tmp_path / "project"
+        folder.mkdir()
+        config_sub = folder / "config"
+        config_sub.mkdir()
+        (folder / "requirements.md").write_text("AI Research", encoding="utf-8")
+
+        topic, title, user_prompt, prompt_dir, config_dir = _parse_topic_dir(folder)
+        assert config_dir == str(config_sub)
+
+    def test_parse_topic_dir_no_config_returns_none_config_dir(self, tmp_path):
+        from src.main import _parse_topic_dir
+
+        folder = tmp_path / "project"
+        folder.mkdir()
+        (folder / "requirements.md").write_text("AI Research", encoding="utf-8")
+
+        topic, title, user_prompt, prompt_dir, config_dir = _parse_topic_dir(folder)
+        assert config_dir is None
 
     def test_parse_topic_dir_title_is_folder_name(self, tmp_path):
         from src.main import _parse_topic_dir
@@ -795,7 +819,7 @@ class TestTopicDir:
             "## Topic\nStock Trading Strategies\n", encoding="utf-8"
         )
 
-        topic, title, user_prompt, prompt_dir = _parse_topic_dir(folder)
+        topic, title, user_prompt, prompt_dir, config_dir = _parse_topic_dir(folder)
         assert title == "stock-trading"
         assert topic == "Stock Trading Strategies"
 

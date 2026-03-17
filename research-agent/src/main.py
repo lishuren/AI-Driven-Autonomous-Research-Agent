@@ -67,6 +67,7 @@ def _load_dotenv(env_path: Optional[Path] = None) -> None:
 _load_dotenv()
 
 from src.agent_manager import AgentManager
+from src.config_loader import load_filters_config
 from src.tools.search_tool import SearchLogger
 
 logging.basicConfig(
@@ -160,8 +161,8 @@ def _parse_duration(value: str) -> float:
     return total
 
 
-def _parse_topic_dir(folder: Path) -> tuple[str, str, Optional[str], Optional[str]]:
-    """Parse a topic directory and return (topic, title, user_prompt, prompt_dir).
+def _parse_topic_dir(folder: Path) -> tuple[str, str, Optional[str], Optional[str], Optional[str]]:
+    """Parse a topic directory and return (topic, title, user_prompt, prompt_dir, config_dir).
 
     Searches the folder for a requirements/topic file in priority order:
     1. ``requirements.md``
@@ -175,12 +176,21 @@ def _parse_topic_dir(folder: Path) -> tuple[str, str, Optional[str], Optional[st
 
     When a ``prompts/`` sub-folder exists it is returned as *prompt_dir* so
     that its template files override the bundled defaults.
+
+    When a ``config/`` sub-folder exists it is returned as *config_dir* so
+    that its ``filters.json`` overrides the bundled filter defaults.
     """
     # Determine prompt override directory
     prompt_dir: Optional[str] = None
     prompts_sub = folder / "prompts"
     if prompts_sub.is_dir():
         prompt_dir = str(prompts_sub)
+
+    # Determine config override directory
+    config_dir: Optional[str] = None
+    config_sub = folder / "config"
+    if config_sub.is_dir():
+        config_dir = str(config_sub)
 
     # Locate the requirements / topic file
     md_file: Optional[Path] = None
@@ -203,7 +213,7 @@ def _parse_topic_dir(folder: Path) -> tuple[str, str, Optional[str], Optional[st
 
     # Always use the folder name as the report title
     title = folder.name
-    return topic, title, user_prompt, prompt_dir
+    return topic, title, user_prompt, prompt_dir, config_dir
 
 
 def _parse_args() -> argparse.Namespace:
@@ -303,6 +313,14 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Optional directory containing prompt template files that override "
              "the bundled defaults. Env: RESEARCH_PROMPT_DIR.",
+    )
+    parser.add_argument(
+        "--config-dir",
+        type=str,
+        default=None,
+        help="Optional directory containing a filters.json that overrides the "
+             "bundled filter defaults (stopwords, filler words, hub patterns, etc.). "
+             "Env: RESEARCH_CONFIG_DIR.",
     )
     parser.add_argument(
         "--data-dir",
@@ -885,6 +903,7 @@ def main() -> None:
         or _str_env("SILICONFLOW_API_KEY")
     )
     prompt_dir = args.prompt_dir or _str_env("RESEARCH_PROMPT_DIR")
+    config_dir = args.config_dir or _str_env("RESEARCH_CONFIG_DIR")
     llm_url = (
         args.llm_url
         or _str_env("RESEARCH_LLM_URL")
@@ -907,7 +926,7 @@ def main() -> None:
         topic_dir = Path(args.topic_dir)
         if not topic_dir.is_dir():
             sys.exit(f"Topic directory not found: {args.topic_dir!r}")
-        topic, report_title, user_prompt, dir_prompt_dir = _parse_topic_dir(topic_dir)
+        topic, report_title, user_prompt, dir_prompt_dir, dir_config_dir = _parse_topic_dir(topic_dir)
         # Output goes to <folder>/output/
         output_dir = topic_dir / "output"
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -916,6 +935,9 @@ def main() -> None:
         # Apply prompts sub-folder only when the user hasn't already set --prompt-dir
         if dir_prompt_dir is not None and not prompt_dir:
             prompt_dir = dir_prompt_dir
+        # Apply config sub-folder only when the user hasn't already set --config-dir
+        if dir_config_dir is not None and not config_dir:
+            config_dir = dir_config_dir
         task_json_path = str(output_dir / "task.json")
     elif args.requirements_file is not None:
         req_path = Path(args.requirements_file)
@@ -954,6 +976,9 @@ def main() -> None:
 
     # Resolve scraping flags (CLI → env → default)
     from src.tools.scraper_tool import set_respect_robots
+
+    # Load filter configuration (custom overrides bundled defaults when provided)
+    load_filters_config(config_dir)
 
     def _bool_env(name: str, default: bool) -> bool:
         val = os.environ.get(name, "").strip().lower()

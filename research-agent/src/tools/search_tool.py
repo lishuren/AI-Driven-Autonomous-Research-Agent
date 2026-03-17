@@ -24,6 +24,8 @@ from typing import TYPE_CHECKING, Any, Optional
 if TYPE_CHECKING:
     from src.budget import BudgetTracker
 
+from src.config_loader import get_filters_config
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -90,18 +92,6 @@ class SearchLogger:
 _RATE_LIMIT_MIN = 2.0
 _RATE_LIMIT_MAX = 5.0
 _DEFAULT_MAX_RESULTS = 5
-
-
-# URL substrings that indicate a captcha or block page rather than a real result.
-_CAPTCHA_URL_MARKERS = (
-    "showcaptcha",
-    "/captcha",
-    "?captcha",
-    "&captcha",
-    "validatecaptcha",
-    "robot",
-    "challenge",
-)
 
 # Unicode ranges that indicate CJK (Chinese/Japanese/Korean) content.
 _CJK_RANGES = (
@@ -270,7 +260,7 @@ def _normalise_results(raw_results: list[dict[str, Any]]) -> list[dict[str, Any]
 
         # Drop results whose URL is a captcha / robot-challenge page.
         url_lower = url.lower()
-        if any(marker in url_lower for marker in _CAPTCHA_URL_MARKERS):
+        if any(marker in url_lower for marker in get_filters_config()["captcha_url_markers"]):
             logger.info("Filtered captcha/block URL from results: %s", url[:80])
             continue
 

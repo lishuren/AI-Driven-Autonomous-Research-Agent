@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Optional
 if TYPE_CHECKING:
     from src.tools.search_tool import SearchTool
 
+from src.config_loader import get_filters_config
 from src.llm_client import generate_text
 from src.prompt_loader import load_prompt
 
@@ -48,13 +49,6 @@ _ANALYZE_PROMPT_FILE = "planner_analyze.md"
 _HIERARCHICAL_DECOMPOSE_PROMPT_FILE = "planner_hierarchical_decompose.md"
 _CONSOLIDATION_PROMPT_FILE = "planner_consolidate.md"
 _RESTRUCTURE_PROMPT_FILE = "planner_restructure.md"
-
-
-_STOPWORDS = {
-    "a", "an", "the", "and", "or", "of", "in", "to", "for", "with",
-    "on", "at", "by", "from", "is", "are", "was", "be", "as", "it",
-    "its", "this", "that", "how", "what", "which", "who", "s",
-}
 
 
 class PlannerAgent:
@@ -121,8 +115,7 @@ class PlannerAgent:
             (line.strip() for line in topic.split("\n") if line.strip()), topic
         )
         # Strip date stamps and separator noise (mirrors _make_search_query in
-        # agent_manager) so that "在线 TRPG 市场分析 - 中国市场（2026-03-06）"
-        # becomes "在线 TRPG 市场分析 中国市场" before we send the query.
+        # agent_manager) to clean up date suffixes and separator characters.
         search_query = re.sub(r"[（(]\d{4}[-/]\d{2}[-/]\d{2}[）)]", "", first_line)
         search_query = re.sub(r"[（(]\d{4}[）)]", "", search_query)
         search_query = re.sub(r"\s*[-–—|]+\s*", " ", search_query).strip()[:150]
@@ -137,7 +130,7 @@ class PlannerAgent:
             text = f"{r.get('title', '')} {r.get('body', '')[:120]}"
             for raw_word in re.split(r"\W+", text):
                 word = raw_word.lower().strip()
-                if len(word) >= 3 and word not in _STOPWORDS:
+                if len(word) >= 3 and word not in get_filters_config()["stopwords"]:
                     words[word] = words.get(word, 0) + 1
 
         # Return most-frequent words (real vocabulary from the web)
@@ -178,21 +171,9 @@ class PlannerAgent:
         query = ' '.join(words_raw)
 
         # Pass 1: explicit blocklist of common LLM embellishments
-        _FILLER = {
-            "detailed", "detail", "comprehensive", "in-depth", "indepth",
-            "quality", "authoritative", "scholarly", "academic", "advanced",
-            "expert", "analytical", "analysis", "narrative", "elements",
-            "architectural", "thematic", "contextual", "technological",
-            "mechanisms", "paradigm", "strategies", "exploration", "overview",
-            "framework", "implementation", "foundational", "fundamental",
-            "examination", "investigation", "perspective", "aspects",
-            "concepts", "principles", "dynamics", "insights", "approach",
-            "methodology", "techniques", "components", "structure",
-            "from", "research", "sources", "authoritative", "source",
-            "study", "guide", "deeper", "understanding",
-        }
+        filler_words = get_filters_config()["filler_words"]
         words = query.split()
-        words = [w for w in words if w.lower().rstrip("s") not in _FILLER and w.lower() not in _FILLER]
+        words = [w for w in words if w.lower().rstrip("s") not in filler_words and w.lower() not in filler_words]
 
         # Pass 2: if still >8 words, keep only topic words + allowed helpers.
         # Skip entirely for CJK queries — Chinese/Japanese/Korean words are not
@@ -200,16 +181,10 @@ class PlannerAgent:
         # them leaves an empty query.
         if len(words) > 8 and topic and not _contains_cjk("".join(words)):
             topic_words = set(topic.lower().split())
-            _ALLOWED_HELPERS = {
-                "season", "episode", "cast", "plot", "characters", "summary",
-                "review", "release", "explained", "how", "why", "list", "vs",
-                "history", "tutorial", "formula", "algorithm", "code",
-                "example", "python", "date", "trailer", "ending", "finale",
-                "recap", "explained", "wiki", "imdb", "rating", "s3", "s4",
-            }
+            allowed_helpers = get_filters_config()["allowed_query_helpers"]
             words = [
                 w for w in words
-                if w.lower() in topic_words or w.lower() in _ALLOWED_HELPERS
+                if w.lower() in topic_words or w.lower() in allowed_helpers
             ]
 
         result = " ".join(words).strip()

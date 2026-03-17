@@ -47,10 +47,8 @@ _SEPARATOR_RE = re.compile(r"\s*[-–—|]+\s*")
 def _make_search_query(name: str) -> str:
     """Derive a clean, short search query from a topic name.
 
-    Removes date stamps (e.g. ``（2026-03-06）``) and normalises separators
-    (``-``, ``–``, ``—``, ``|``) to spaces so phrases like
-    ``在线 TRPG 市场分析 - 中国市场（2026-03-06）`` become
-    ``在线 TRPG 市场分析 中国市场``.
+    Removes date stamps (e.g. ``(2026-03-06)``) and normalises separators
+    (``-``, ``–``, ``—``, ``|``) to spaces.
     """
     q = _DATE_PATTERNS.sub("", name)
     q = _SEPARATOR_RE.sub(" ", q)
