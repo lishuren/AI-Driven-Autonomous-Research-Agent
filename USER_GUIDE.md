@@ -202,12 +202,13 @@ Important:
 ### Using a topic directory
 
 A topic directory bundles the research specification, optional custom prompts,
-and all output into a single self-contained folder:
+optional filter overrides, and all output into a single self-contained folder:
 
 ```
 my-research/
 ├── requirements.md      ← research specification (topic.md also accepted)
 ├── prompts/             ← optional: override any bundled prompt template
+├── config/              ← optional: override filter settings (filters.json)
 └── output/              ← auto-created by the agent on first run
     ├── reports/
     ├── research.db
@@ -239,6 +240,10 @@ python -m src.main --topic-dir ./my-research/ --duration 2h
 
 If a `prompts/` sub-folder exists in the directory it is automatically wired as
 `--prompt-dir`.  An explicit `--prompt-dir` on the CLI always takes precedence.
+
+If a `config/` sub-folder exists in the directory it is automatically wired as
+`--config-dir` to override filter settings.  An explicit `--config-dir` on the
+CLI always takes precedence.
 
 ### Crash recovery with task.json
 
@@ -283,6 +288,25 @@ python -m src.main --topic "Stock Trading Strategies" --prompt-dir /tmp/my-promp
 
 Only the `.md` prompt files you override need to exist in your custom
 directory; the rest fall back to the bundled defaults.
+
+### Customising filter settings
+
+Bundled filter settings (stopwords, filler words, CAPTCHA URL markers, hub
+page patterns, and link exclusions) live in `research-agent/config/filters.json`.
+To override specific filters for a particular run, copy the file and modify only
+the keys you want to change:
+
+```bash
+cp -R config /tmp/my-config
+# Edit /tmp/my-config/filters.json
+python -m src.main --topic "Stock Trading Strategies" --config-dir /tmp/my-config
+```
+
+Only the keys present in your override file are merged on top of the bundled
+defaults; all other keys retain their bundled values.  The same applies to the
+`config/` sub-folder inside a topic directory — it is picked up automatically.
+
+The `RESEARCH_CONFIG_DIR` environment variable can be used instead of the CLI flag.
 
 ### Requirements file format
 
