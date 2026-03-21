@@ -85,6 +85,7 @@ _CYCLE_SLEEP_MIN = 2.0
 _CYCLE_SLEEP_MAX = 5.0
 _QUEUE_REFRESH_EVERY = 10  # refill queue every N approved findings
 _REPORT_WRITE_INTERVAL = 60.0  # minimum seconds between progressive report saves
+_HEARTBEAT_INTERVAL = 15.0     # seconds between progress heartbeat log lines
 _OLLAMA_TAGS_TIMEOUT_SECONDS = 10
 
 
@@ -643,6 +644,7 @@ async def run(
 
         budget_logged = False
         last_report_write = time.monotonic()
+        last_heartbeat = time.monotonic()
         while True:
             # Hard deadline: stop before starting new work when time is up
             if time.monotonic() >= end_time:
@@ -700,8 +702,15 @@ async def run(
                     max(0.0, remaining / 60),
                 )
 
-            # Progressive report save: always on a new finding, otherwise throttled
+            # Heartbeat: log progress every N seconds so the console isn't silent
             now = time.monotonic()
+            if not finding and (now - last_heartbeat) >= _HEARTBEAT_INTERVAL:
+                logger.info("[Working]  %s", manager.progress_summary())
+                last_heartbeat = now
+            elif finding:
+                last_heartbeat = now
+
+            # Progressive report save: always on a new finding, otherwise throttled
             if finding or (now - last_report_write) >= _REPORT_WRITE_INTERVAL:
                 try:
                     manager.generate_report()

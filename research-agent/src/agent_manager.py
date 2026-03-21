@@ -595,6 +595,22 @@ class AgentManager:
 
         return None
 
+    def progress_summary(self) -> str:
+        """Return a one-line human-readable progress string for heartbeat logging."""
+        if self._graph is None:
+            queued = len([t for t in getattr(self, "_queue", [])]) if hasattr(self, "_queue") else 0
+            return f"flat-mode queue={queued}  approved={len(self._approved)}"
+        nodes = self._graph.get_all_nodes()
+        done  = sum(1 for n in nodes if n.status in ("completed", "consolidated"))
+        pend  = sum(1 for n in nodes if n.status == "pending")
+        active = next((n.name for n in nodes if n.status == "researching"), None)
+        consolidating = next((n.name for n in nodes if n.status == "analyzing"), None)
+        working = f"  working={active!r}" if active else (f"  consolidating={consolidating!r}" if consolidating else "")
+        return (
+            f"approved={len(self._approved)}  done={done}/{len(nodes)}"
+            f"  pending={pend}  depth={self._current_research_depth}{working}"
+        )
+
     def has_graph_work(self) -> bool:
         """Return True if there are still nodes to research, decompose, or consolidate."""
         if self._graph is None:
@@ -634,6 +650,17 @@ class AgentManager:
         self._graph.mark_researching(node.id)
         task = {"subtopic": node.name, "query": node.query}
         reject_count = 0
+        pending_total = sum(
+            1 for n in self._graph.get_all_nodes() if n.status in ("pending", "researching")
+        )
+        done_total = sum(
+            1 for n in self._graph.get_all_nodes()
+            if n.status in ("completed", "consolidated")
+        )
+        logger.info(
+            "[Researching] %r  (done=%d, pending≈%d, depth=%d)",
+            node.name, done_total, pending_total, node.depth,
+        )
 
         while reject_count < _MAX_REJECT_RETRIES:
             result = await self._researcher.research(task)
@@ -724,6 +751,7 @@ class AgentManager:
             self._save_tree_json()
             return None
 
+        logger.info("[Consolidating] %r  (%d child summaries)", node.name, len(child_summaries))
         consolidated = await self._planner.consolidate_summaries(
             node.name, child_summaries,
         )
