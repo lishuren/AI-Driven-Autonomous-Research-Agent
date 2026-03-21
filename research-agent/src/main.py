@@ -84,6 +84,7 @@ _ERROR_SLEEP_SECONDS = 5
 _CYCLE_SLEEP_MIN = 2.0
 _CYCLE_SLEEP_MAX = 5.0
 _QUEUE_REFRESH_EVERY = 10  # refill queue every N approved findings
+_REPORT_WRITE_INTERVAL = 60.0  # minimum seconds between progressive report saves
 _OLLAMA_TAGS_TIMEOUT_SECONDS = 10
 
 
@@ -641,6 +642,7 @@ async def run(
             manager.generate_report()  # Update report with graph outline
 
         budget_logged = False
+        last_report_write = time.monotonic()
         while True:
             # Hard deadline: stop before starting new work when time is up
             if time.monotonic() >= end_time:
@@ -698,11 +700,14 @@ async def run(
                     max(0.0, remaining / 60),
                 )
 
-            # Progressive report save after every cycle (not just on approved findings)
-            try:
-                manager.generate_report()
-            except Exception as report_exc:
-                logger.warning("Progressive report save failed: %s", report_exc)
+            # Progressive report save: always on a new finding, otherwise throttled
+            now = time.monotonic()
+            if finding or (now - last_report_write) >= _REPORT_WRITE_INTERVAL:
+                try:
+                    manager.generate_report()
+                    last_report_write = now
+                except Exception as report_exc:
+                    logger.warning("Progressive report save failed: %s", report_exc)
 
             cycles_completed += 1
 
