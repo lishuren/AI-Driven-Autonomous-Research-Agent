@@ -593,6 +593,24 @@ class AgentManager:
         if consolidatable:
             return await self._consolidate_node(consolidatable[0])
 
+        # --- Step 4: Safety net — orphan pending leaves at non-current depths ---
+        # Nodes can become stranded if restructuring resets a cross-referenced
+        # node's status to pending while leaving its depth unchanged (e.g. depth 1
+        # when _current_research_depth has already advanced to 2).
+        orphan_pending = sorted(
+            [
+                n for n in self._graph.get_all_nodes()
+                if n.is_leaf and n.status == "pending" and n.depth != depth
+            ],
+            key=lambda n: n.priority, reverse=True,
+        )
+        if orphan_pending and not self.budget.is_exhausted():
+            logger.warning(
+                "Orphan pending leaf %r at depth %d (current depth=%d) — rescuing.",
+                orphan_pending[0].name, orphan_pending[0].depth, depth,
+            )
+            return await self._research_node(orphan_pending[0])
+
         return None
 
     def progress_summary(self) -> str:
@@ -815,13 +833,20 @@ class AgentManager:
         for suggestion in suggestions:
             if suggestion.get("action") != "add":
                 continue
+            node_name = suggestion.get("name", "")
+            # Skip if a node with this name already exists — resetting an
+            # existing node's status would strand it at its original depth,
+            # causing run_graph to spin without making progress.
+            if self._graph.find_by_name(node_name) is not None:
+                logger.info("Restructure: skipping already-existing node %r.", node_name)
+                continue
             parent_name = suggestion.get("parent_name", "")
             parent = self._graph.find_by_name(parent_name)
             if parent is None:
                 parent = self._graph.root
             try:
                 new_node = self._graph.add_node(
-                    name=suggestion.get("name", ""),
+                    name=node_name,
                     query=suggestion.get("query", ""),
                     parent_id=parent.id,
                     priority=suggestion.get("priority", 5),
