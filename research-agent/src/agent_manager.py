@@ -277,8 +277,6 @@ class AgentManager:
         last_saved = state.get("last_saved_iso", "unknown")
 
         if prev_status == "completed":
-            # Previous run finished — restore graph for report regeneration,
-            # but has_graph_work() will return False so the loop exits quickly.
             logger.info(
                 "Restoring completed session from %s (saved %s).",
                 task_json_path, last_saved,
@@ -308,6 +306,35 @@ class AgentManager:
                 self._graph.node_count(),
                 self._current_research_depth,
             )
+
+            # If the session was saved as "completed" but there are still pending
+            # leaf nodes (e.g. from a post-consolidation restructure that ran out
+            # of budget), reset the root and their direct parents back to
+            # "completed" so the next run can research and re-consolidate them.
+            if prev_status == "completed":
+                pending_nodes = [
+                    n for n in self._graph.get_all_nodes()
+                    if n.status == "pending"
+                ]
+                if pending_nodes:
+                    nodes_by_id = {n.id: n for n in self._graph.get_all_nodes()}
+                    to_reset: set[str] = {self._graph.root.id}
+                    for pn in pending_nodes:
+                        for pid in pn.parent_ids:
+                            to_reset.add(pid)
+                    reset_count = 0
+                    for nid in to_reset:
+                        anc = nodes_by_id.get(nid)
+                        if anc and anc.status == "consolidated":
+                            anc.status = "completed"
+                            reset_count += 1
+                    if reset_count:
+                        logger.info(
+                            "Found %d pending nodes in a completed session — "
+                            "reset %d consolidated ancestors to allow further research.",
+                            len(pending_nodes),
+                            reset_count,
+                        )
 
         return True
 

@@ -271,9 +271,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model",
         type=str,
-        default="qwen2.5:7b",
+        default=None,
         help="Model name for the selected LLM provider (default: qwen2.5:7b). "
-             "For Ollama, runtime falls back to an installed local model if needed.",
+             "For Ollama, runtime falls back to an installed local model if needed. "
+             "Env: RESEARCH_MODEL.",
     )
     parser.add_argument(
         "--llm-provider",
@@ -971,6 +972,10 @@ def main() -> None:
     max_queries = args.max_queries if args.max_queries is not None else _int_env("RESEARCH_MAX_QUERIES")
     max_nodes = args.max_nodes if args.max_nodes is not None else _int_env("RESEARCH_MAX_NODES")
     max_credits = args.max_credits_spend if args.max_credits_spend is not None else _float_env("RESEARCH_MAX_CREDITS")
+
+    # Resolve model — CLI → env → default
+    _model_env = os.environ.get("RESEARCH_MODEL", "").strip()
+    args.model = args.model or _model_env or "qwen2.5:7b"
 
     warn_threshold = args.warn_credits
 

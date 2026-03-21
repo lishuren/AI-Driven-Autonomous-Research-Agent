@@ -16,7 +16,11 @@ import urllib.parse
 import urllib.robotparser
 from typing import Optional
 
-from playwright.async_api import async_playwright
+try:
+    from playwright.async_api import async_playwright
+    _HAS_PLAYWRIGHT = True
+except ImportError:
+    _HAS_PLAYWRIGHT = False
 
 from src.config_loader import get_filters_config
 
@@ -109,7 +113,12 @@ class ScraperTool:
 
         Retries on transient network failures with exponential backoff.
         Returns *None* on permanent failures or when max retries are exceeded.
+        Returns *None* immediately if Playwright is not installed.
         """
+        if not _HAS_PLAYWRIGHT:
+            logger.debug("Playwright not installed; skipping scrape of %r.", url)
+            return None
+
         # Advisory robots.txt check
         _check_robots_txt(url)
 
