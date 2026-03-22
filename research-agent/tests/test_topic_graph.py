@@ -176,6 +176,19 @@ class TestTopicGraph:
         g.add_node(name="Object Detection", query="OD", parent_id=c.id)
         assert g.max_depth_present() == 2
 
+    def test_add_node_beyond_default_max_depth(self):
+        """Nodes deeper than the default MAX_DEPTH constant can be added — depth
+        enforcement is the caller's (AgentManager) responsibility, not add_node's."""
+        from src.topic_graph import TopicGraph
+
+        g = TopicGraph(root_name="Root", root_query="root")
+        d1 = g.add_node(name="D1", query="d1", parent_id=g.root.id)
+        d2 = g.add_node(name="D2", query="d2", parent_id=d1.id)
+        d3 = g.add_node(name="D3", query="d3", parent_id=d2.id)  # depth 3 — was forbidden
+
+        assert d3.depth == 3
+        assert g.max_depth_present() == 3
+
     def test_to_tree_dict_basic(self):
         from src.topic_graph import TopicGraph
 

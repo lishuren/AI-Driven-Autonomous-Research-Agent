@@ -130,19 +130,16 @@ class TopicGraph:
         node instead of creating a duplicate. Returns the (possibly
         pre-existing) node.
 
-        Raises ``ValueError`` if *parent_id* is unknown or *depth* exceeds
-        ``MAX_DEPTH``.
+        Raises ``ValueError`` if *parent_id* is unknown.
+
+        Depth is not enforced here — the caller (``AgentManager._decompose_node``)
+        is responsible for honouring ``self._max_depth``.
         """
         parent = self._nodes.get(parent_id)
         if parent is None:
             raise ValueError(f"Unknown parent node: {parent_id!r}")
 
         node_depth = depth if depth is not None else parent.depth + 1
-        if node_depth > MAX_DEPTH:
-            raise ValueError(
-                f"Depth {node_depth} exceeds MAX_DEPTH ({MAX_DEPTH}) "
-                f"for node {name!r}"
-            )
 
         # Cross-reference deduplication: existing node with same name?
         existing = self.find_by_name(name)
