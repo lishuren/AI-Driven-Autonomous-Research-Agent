@@ -715,6 +715,98 @@ class TestTaskJsonSaveRestore:
         assert manager2._graph is not None
 
 
+class TestExtendGraphForDeeperResearch:
+    """Tests for AgentManager.extend_graph_for_deeper_research()."""
+
+    def _build_manager(self, tmp_path, max_depth=2):
+        from src.agent_manager import AgentManager
+
+        with patch("src.agent_manager.PlannerAgent"), \
+             patch("src.agent_manager.ResearcherAgent"), \
+             patch("src.agent_manager.CriticAgent"), \
+             patch("src.agent_manager.KnowledgeBase"):
+            return AgentManager(
+                topic="Trading",
+                reports_dir=str(tmp_path / "reports"),
+                db_path=str(tmp_path / "db"),
+                max_depth=max_depth,
+            )
+
+    def _fully_consolidated_graph(self):
+        """Build a small 2-level graph where every node is done."""
+        from src.topic_graph import TopicGraph
+
+        g = TopicGraph(root_name="Trading", root_query="trading")
+        child = g.add_node(name="RSI", query="rsi", parent_id=g.root.id)
+        g.mark_leaf(child.id)
+        g.mark_researched(child.id, "RSI summary", [])
+        g.mark_consolidated(g.root.id, "Root consolidated")
+        return g
+
+    def test_no_extension_when_depth_already_at_target(self, tmp_path):
+        """Returns 0 and changes nothing when graph max depth == _max_depth."""
+        manager = self._build_manager(tmp_path, max_depth=2)
+        g = self._fully_consolidated_graph()  # max_depth_present() == 1 ≤ _max_depth 2
+        # Set the graph's deepest node to depth 2 to match _max_depth
+        import src.topic_graph as tg_mod
+        g._nodes[list(g._nodes.keys())[-1]].depth = 2
+        manager._graph = g
+        manager._max_depth = 2
+
+        result = manager.extend_graph_for_deeper_research()
+        assert result == 0
+
+    def test_extension_reopens_deepest_nodes(self, tmp_path):
+        """Deepest completed/consolidated nodes are reset to pending non-leaf."""
+        manager = self._build_manager(tmp_path, max_depth=3)
+        g = self._fully_consolidated_graph()  # max_depth_present() == 1; _max_depth == 3
+        manager._graph = g
+
+        count = manager.extend_graph_for_deeper_research()
+
+        assert count == 1
+        rsi = g.find_by_name("RSI")
+        assert rsi.is_leaf is False
+        assert rsi.status == "pending"
+
+    def test_extension_resets_consolidated_ancestors(self, tmp_path):
+        """Ancestor nodes that were consolidated are reset to 'completed'."""
+        manager = self._build_manager(tmp_path, max_depth=3)
+        g = self._fully_consolidated_graph()
+        manager._graph = g
+
+        manager.extend_graph_for_deeper_research()
+
+        assert g.root.status == "completed"
+
+    def test_extension_sets_current_depth_to_old_max(self, tmp_path):
+        """_current_research_depth is set to the old max depth after extension."""
+        manager = self._build_manager(tmp_path, max_depth=3)
+        g = self._fully_consolidated_graph()
+        manager._graph = g
+        manager._current_research_depth = 0  # simulate restored value
+
+        manager.extend_graph_for_deeper_research()
+
+        assert manager._current_research_depth == 1  # old max depth
+
+    def test_extension_makes_has_graph_work_true(self, tmp_path):
+        """After extension the manager reports there is work to do."""
+        manager = self._build_manager(tmp_path, max_depth=3)
+        g = self._fully_consolidated_graph()
+        manager._graph = g
+
+        manager.extend_graph_for_deeper_research()
+
+        assert manager.has_graph_work() is True
+
+    def test_no_extension_without_graph(self, tmp_path):
+        """Returns 0 gracefully when no graph is loaded."""
+        manager = self._build_manager(tmp_path, max_depth=3)
+        result = manager.extend_graph_for_deeper_research()
+        assert result == 0
+
+
 class TestInlineSourceLinks:
     """Tests for inline source reference links in generated reports."""
 

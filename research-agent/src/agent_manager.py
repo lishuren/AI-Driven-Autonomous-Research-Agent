@@ -629,6 +629,52 @@ class AgentManager:
             f"  pending={pend}  depth={self._current_research_depth}{working}"
         )
 
+    def extend_graph_for_deeper_research(self) -> int:
+        """Re-open deepest nodes for further decomposition when _max_depth has grown.
+
+        Called after restoring a completed session with a higher ``--max-depth``
+        than the original run.  Returns the number of nodes re-opened (0 if there
+        is nothing to extend).
+        """
+        if self._graph is None:
+            return 0
+
+        current_max = self._graph.max_depth_present()
+        if current_max >= self._max_depth:
+            return 0  # already at or beyond target depth
+
+        # Re-open every node at the current deepest level so _decompose_node will
+        # expand it into a new generation of children.
+        deepest_nodes = self._graph.get_nodes_at_depth(current_max)
+        reopened = 0
+        for node in deepest_nodes:
+            if node.status in ("completed", "consolidated", "failed"):
+                node.is_leaf = False
+                node.status = "pending"
+                reopened += 1
+
+        if reopened == 0:
+            return 0
+
+        # Walk back up the ancestor chain: reset "consolidated" → "completed" so
+        # those nodes are picked up for re-consolidation once the new leaves are done.
+        for depth in range(current_max - 1, -1, -1):
+            for node in self._graph.get_nodes_at_depth(depth):
+                if node.status == "consolidated":
+                    node.status = "completed"
+
+        # Also reset root (depth 0 is included above, but be explicit)
+        if self._graph.root.status == "consolidated":
+            self._graph.root.status = "completed"
+
+        self._current_research_depth = current_max
+        logger.info(
+            "Extending graph: re-opened %d node(s) at depth %d for decomposition "
+            "(new max depth: %d).",
+            reopened, current_max, self._max_depth,
+        )
+        return reopened
+
     def has_graph_work(self) -> bool:
         """Return True if there are still nodes to research, decompose, or consolidate."""
         if self._graph is None:

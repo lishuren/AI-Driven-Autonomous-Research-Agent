@@ -630,6 +630,15 @@ async def run(
                 task_restored = manager.restore_task(task_path)
 
         if task_restored:
+            # If the user re-runs with a higher --max-depth, extend the graph so
+            # the previously-completed session grows new deeper leaves instead of
+            # immediately exiting as "work complete".
+            extended = manager.extend_graph_for_deeper_research()
+            if extended:
+                logger.info(
+                    "Session restored and extended to depth %d (%d node(s) re-opened).",
+                    manager._max_depth, extended,
+                )
             manager.generate_report()  # Refresh report with restored graph
         else:
             # Fresh start: build the hierarchical topic graph
