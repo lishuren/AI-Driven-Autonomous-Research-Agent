@@ -304,3 +304,94 @@ class TestNodeMerging:
         # n1 is "completed", should not be merged
         merged = g.merge_similar_nodes(depth=1, threshold=0.50)
         assert g.get_node(n1.id) is not None  # n1 should still exist
+
+
+# ---------------------------------------------------------------------------
+# Prune Failed Subtrees
+# ---------------------------------------------------------------------------
+
+class TestPruneFailedSubtrees:
+    def test_prune_removes_all_failed_subtree(self):
+        """A subtree where every node is failed should be pruned."""
+        from src.topic_graph import TopicGraph
+
+        g = TopicGraph(root_name="Root", root_query="root")
+        g.root.status = "completed"
+        good = g.add_node(name="Good", query="good", parent_id=g.root.id)
+        g.mark_leaf(good.id)
+        g.mark_researched(good.id, "good summary", [])
+
+        bad = g.add_node(name="Bad", query="bad", parent_id=g.root.id)
+        bad_child = g.add_node(name="BadChild", query="bad child", parent_id=bad.id)
+        bad.status = "failed"
+        bad_child.status = "failed"
+        g.mark_leaf(bad_child.id)
+
+        removed = g.prune_failed_subtrees()
+
+        assert removed == 2  # bad + bad_child
+        assert g.find_by_name("Bad") is None
+        assert g.find_by_name("BadChild") is None
+        assert g.find_by_name("Good") is not None
+        assert bad.id not in g.root.children_ids
+
+    def test_prune_skips_partially_completed_branch(self):
+        """A branch with at least one non-failed node must NOT be pruned."""
+        from src.topic_graph import TopicGraph
+
+        g = TopicGraph(root_name="Root", root_query="root")
+        g.root.status = "completed"
+        branch = g.add_node(name="Mixed", query="mixed", parent_id=g.root.id)
+        branch.status = "failed"
+        good_child = g.add_node(name="GoodChild", query="good child", parent_id=branch.id)
+        g.mark_leaf(good_child.id)
+        g.mark_researched(good_child.id, "some content", [])  # completed, not failed
+
+        removed = g.prune_failed_subtrees()
+        assert removed == 0
+        assert g.find_by_name("GoodChild") is not None
+
+    def test_prune_returns_zero_when_nothing_to_prune(self):
+        """No failed subtrees → returns 0 and graph is unmodified."""
+        from src.topic_graph import TopicGraph
+
+        g = TopicGraph(root_name="Root", root_query="root")
+        g.root.status = "consolidated"
+        c = g.add_node(name="Child", query="child", parent_id=g.root.id)
+        g.mark_leaf(c.id)
+        g.mark_researched(c.id, "child summary", [])
+
+        before_count = g.node_count()
+        removed = g.prune_failed_subtrees()
+        assert removed == 0
+        assert g.node_count() == before_count
+
+    def test_prune_skips_cross_referenced_node_with_live_parent(self):
+        """A failed node that is also a child of a live parent must not be pruned."""
+        from src.topic_graph import TopicGraph
+
+        g = TopicGraph(root_name="Root", root_query="root")
+        g.root.status = "completed"
+
+        # live_branch is alive
+        live_branch = g.add_node(name="Live", query="live", parent_id=g.root.id)
+        live_branch.status = "completed"
+
+        # dead_branch is fully failed
+        dead_branch = g.add_node(name="Dead", query="dead", parent_id=g.root.id)
+        dead_branch.status = "failed"
+
+        # shared_node is a child of BOTH dead and live — cross-reference
+        shared = g.add_node(name="Shared", query="shared", parent_id=dead_branch.id)
+        shared.status = "failed"
+        g.mark_leaf(shared.id)
+        # Manually add live_branch as a second parent
+        shared.parent_ids.append(live_branch.id)
+        live_branch.children_ids.append(shared.id)
+
+        # Without the cross-reference guard, "Dead" subtree would be prunable.
+        # With the guard, since "Shared" has a live parent (live_branch), it cannot be pruned.
+        removed = g.prune_failed_subtrees()
+        assert removed == 0
+        assert g.find_by_name("Shared") is not None
+

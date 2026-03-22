@@ -422,6 +422,92 @@ class TopicGraph:
             counts[node.status] = counts.get(node.status, 0) + 1
         return counts
 
+    def prune_failed_subtrees(self) -> int:
+        """Remove subtrees where every node has ``status == 'failed'``.
+
+        Identifies nodes whose entire sub-DAG is failed, then prunes the
+        topmost all-failed subtrees so that permanently dead branches do not
+        accumulate in ``task.json`` across resumed sessions.
+
+        Cross-referenced nodes that have at least one live (non-failed)
+        parent outside their failed subtree are preserved.
+
+        Returns the number of nodes removed.
+        """
+        # Bottom-up: mark nodes whose entire subtree is all-failed.
+        # BFS gives root-first order; reversed gives leaves-first.
+        all_nodes_bfs = self.get_all_nodes()
+        all_failed: set[str] = set()
+        for node in reversed(all_nodes_bfs):
+            if node.id == self._root_id:
+                continue  # never prune root
+            if node.status != "failed":
+                continue
+            children = [self._nodes[cid] for cid in node.children_ids if cid in self._nodes]
+            if all(c.id in all_failed for c in children):
+                all_failed.add(node.id)
+
+        if not all_failed:
+            return 0
+
+        # Prune roots: all-failed nodes ALL of whose parents are NOT in all_failed.
+        # Using ``all(...)`` rather than ``any(...)`` ensures we only select the
+        # topmost entry of each dead subtree.  Cross-referenced nodes that have
+        # one failed parent AND one live parent are NOT prune roots — they will
+        # be caught by the cross-reference safety check when their failed ancestor
+        # is processed.
+        prune_roots = [
+            nid for nid in all_failed
+            if all(pid not in all_failed for pid in self._nodes[nid].parent_ids)
+        ]
+
+        total_removed = 0
+        for root_id in prune_roots:
+            if root_id not in self._nodes:
+                continue  # already removed by an earlier prune root in this pass
+
+            # Collect the full subtree under this prune root.
+            sub_ids: set[str] = set()
+            q: deque[str] = deque([root_id])
+            while q:
+                nid = q.popleft()
+                if nid in sub_ids or nid not in self._nodes:
+                    continue
+                sub_ids.add(nid)
+                q.extend(self._nodes[nid].children_ids)
+
+            # Safety: skip if any DESCENDANT in the subtree (not the prune root
+            # itself, which is expected to have a live parent) has a live external
+            # parent (a cross-reference from outside this failed subtree).
+            has_cross_ref = any(
+                pid not in sub_ids
+                and pid in self._nodes
+                and self._nodes[pid].status != "failed"
+                for nid in sub_ids
+                if nid != root_id  # the prune root is expected to have a live parent
+                for pid in self._nodes[nid].parent_ids
+            )
+            if has_cross_ref:
+                continue
+
+            root_name = self._nodes[root_id].name
+            # Clean parent→child edges before deletion.
+            for node in self._nodes.values():
+                if node.id not in sub_ids:
+                    node.children_ids = [
+                        cid for cid in node.children_ids if cid not in sub_ids
+                    ]
+            for nid in sub_ids:
+                del self._nodes[nid]
+
+            total_removed += len(sub_ids)
+            logger.info(
+                "Pruned all-failed subtree (%d node(s)) rooted at %r.",
+                len(sub_ids), root_name,
+            )
+
+        return total_removed
+
     # ------------------------------------------------------------------
     # Serialization
     # ------------------------------------------------------------------

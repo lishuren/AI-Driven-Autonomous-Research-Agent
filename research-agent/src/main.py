@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -655,6 +656,11 @@ async def run(
         last_report_write = time.monotonic()
         last_heartbeat = time.monotonic()
         while True:
+            remaining_seconds = end_time - time.monotonic()
+            set_remaining = getattr(manager, "set_remaining_seconds_hint", None)
+            if set_remaining is not None:
+                set_remaining(max(0.0, remaining_seconds))
+
             # Hard deadline: stop before starting new work when time is up
             if time.monotonic() >= end_time:
                 logger.info("Duration reached — stopping research and generating report.")
@@ -734,6 +740,15 @@ async def run(
             await asyncio.sleep(sleep_time)
 
     finally:
+        finalize_graph = getattr(manager, "finalize_graph_state", None)
+        if finalize_graph is not None:
+            try:
+                finalize_result = finalize_graph()
+                if inspect.isawaitable(finalize_result):
+                    await finalize_result
+            except Exception as cleanup_exc:
+                logger.warning("Final graph cleanup failed: %s", cleanup_exc)
+
         # Always generate the final report
         elapsed = time.monotonic() - start_time
         report_path = manager.generate_report(elapsed_seconds=elapsed)

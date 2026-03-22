@@ -524,6 +524,43 @@ class TestProgressiveReportSave:
         # generate_report called at start (placeholder) and in finally block
         assert mock_manager.generate_report.call_count >= 2
 
+    def test_run_calls_final_graph_cleanup_before_final_report(self, event_loop, tmp_path):
+        """run() should perform final graph cleanup before the final report write."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from src.main import run
+
+        reports_dir = str(tmp_path / "reports")
+        db_path = str(tmp_path / "research.db")
+
+        mock_manager = MagicMock()
+        mock_manager.init = AsyncMock()
+        mock_manager.close = AsyncMock()
+        mock_manager.build_graph = AsyncMock()
+        mock_manager.has_graph_work = MagicMock(return_value=False)
+        mock_manager.has_tasks = MagicMock(return_value=False)
+        mock_manager.populate_queue = AsyncMock()
+        mock_manager.finalize_graph_state = AsyncMock(return_value=1)
+        mock_manager.generate_report = MagicMock(
+            return_value=tmp_path / "reports" / "test.md"
+        )
+        mock_manager._graph = None
+        mock_manager.budget = MagicMock()
+        mock_manager.budget.is_exhausted = MagicMock(return_value=False)
+        mock_manager.budget.summary = MagicMock(return_value="ok")
+
+        with patch("src.main.AgentManager", return_value=mock_manager), \
+             patch("src.main._list_ollama_models", return_value=[]):
+            event_loop.run_until_complete(
+                run(
+                    topic="Reinforcement Learning",
+                    duration_seconds=1,
+                    reports_dir=reports_dir,
+                    db_path=db_path,
+                )
+            )
+
+        mock_manager.finalize_graph_state.assert_called_once()
+
 
 class TestDryRunArgs:
     """Tests for --dry-run, --estimate-credits, and --warn-credits CLI args."""

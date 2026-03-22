@@ -83,6 +83,13 @@ _REPORT_TEMPLATE = """\
 
 _MAX_REJECT_RETRIES = 3
 _MAX_CONSECUTIVE_FAILURES = 5
+_MIN_EXPANSION_SECONDS = 15 * 60
+_LOW_EXPANSION_SECONDS = 30 * 60
+# Branch-priority pruning: when the graph has more than this many unresolved
+# nodes, leaves with priority strictly below _MIN_LEAF_PRIORITY are skipped
+# on the current pass so budget is spent on higher-value work first.
+_PRIORITY_PRUNE_THRESHOLD = 20
+_MIN_LEAF_PRIORITY = 3
 
 
 class AgentManager:
@@ -178,6 +185,7 @@ class AgentManager:
 
         # Phase 3 — stuck detection
         self._consecutive_failures: int = 0
+        self._remaining_seconds_hint: Optional[float] = None
 
     async def init(self) -> None:
         """Initialise the knowledge base."""
@@ -298,14 +306,20 @@ class AgentManager:
         if "graph" in state:
             self._graph = TopicGraph.from_dict(state["graph"])
             # Reset interrupted nodes so they will be retried
+            reset_count = 0
             for node in self._graph.get_all_nodes():
                 if node.status in ("researching", "analyzing"):
+                    if node.depth >= self._max_depth:
+                        node.is_leaf = True
                     node.status = "pending"
+                    reset_count += 1
             logger.info(
                 "Restored graph with %d nodes at depth %d.",
                 self._graph.node_count(),
                 self._current_research_depth,
             )
+            if reset_count:
+                logger.info("Reset %d interrupted nodes back to pending.", reset_count)
 
             # If the session was saved as "completed" but there are still pending
             # leaf nodes (e.g. from a post-consolidation restructure that ran out
@@ -335,6 +349,15 @@ class AgentManager:
                             len(pending_nodes),
                             reset_count,
                         )
+
+            # Compact accumulated all-failed subtrees so task.json does not grow
+            # indefinitely with permanently dead branches across resumed sessions.
+            pruned = self._graph.prune_failed_subtrees()
+            if pruned:
+                logger.info(
+                    "Compacted %d permanently-failed node(s) from restored graph.",
+                    pruned,
+                )
 
         return True
 
@@ -416,6 +439,12 @@ class AgentManager:
 
         Returns 0 when budget is critically low (force leaf).
         """
+        if self._remaining_seconds_hint is not None:
+            if self._remaining_seconds_hint < _MIN_EXPANSION_SECONDS:
+                return 0
+            if self._remaining_seconds_hint < _LOW_EXPANSION_SECONDS:
+                return 2
+
         frac = self.budget.budget_fraction_remaining()
         if frac < 0.10:
             return 0   # force leaf — almost no budget left
@@ -424,6 +453,16 @@ class AgentManager:
         if frac < 0.50:
             return 3
         return 5
+
+    def set_remaining_seconds_hint(self, remaining_seconds: Optional[float]) -> None:
+        """Expose remaining session time so branching can become deadline-aware."""
+        self._remaining_seconds_hint = remaining_seconds
+
+    def _should_expand_graph(self) -> bool:
+        """Return True when it is still worth creating new graph branches."""
+        if self._remaining_seconds_hint is not None and self._remaining_seconds_hint < _MIN_EXPANSION_SECONDS:
+            return False
+        return self._adaptive_max_children() > 0
 
     async def _decompose_node(
         self,
@@ -553,6 +592,22 @@ class AgentManager:
             [n for n in nodes_at_depth if n.is_leaf and n.status == "pending"],
             key=lambda n: n.priority, reverse=True,
         )
+        # Branch-priority pruning: when the graph is saturated with unresolved
+        # nodes, skip very-low-priority leaves so budget goes to higher-value work.
+        if len(pending_leaves) > 1:
+            sc = self._graph.get_status_counts()
+            unresolved = sc.get("pending", 0) + sc.get("analyzing", 0) + sc.get("failed", 0)
+            if unresolved > _PRIORITY_PRUNE_THRESHOLD:
+                high_priority = [n for n in pending_leaves if n.priority >= _MIN_LEAF_PRIORITY]
+                if high_priority:
+                    skipped = len(pending_leaves) - len(high_priority)
+                    if skipped:
+                        logger.info(
+                            "Priority pruning: deferring %d low-priority leaf(ves) at depth %d "
+                            "(unresolved=%d > %d).",
+                            skipped, depth, unresolved, _PRIORITY_PRUNE_THRESHOLD,
+                        )
+                    pending_leaves = high_priority
         if pending_leaves and not self.budget.is_exhausted():
             return await self._research_node(pending_leaves[0])
 
@@ -581,8 +636,24 @@ class AgentManager:
         ]
         if pending_nonleaf:
             node = pending_nonleaf[0]
-            await self._decompose_node(self._graph, node.id)
-            return None  # decomposition doesn't produce a finding
+            if node.depth < self._max_depth and not self._should_expand_graph():
+                # Close-out mode: convert all stranded pending non-leaf nodes at
+                # this depth to leaves so they are researched directly rather than
+                # left permanently unreachable.
+                converted = 0
+                for stranded in pending_nonleaf:
+                    self._graph.mark_leaf(stranded.id)
+                    stranded.status = "pending"
+                    converted += 1
+                logger.info(
+                    "Close-out mode: converted %d pending non-leaf node(s) to leaves "
+                    "at depth %d for direct research.",
+                    converted, depth,
+                )
+                return None  # next call will pick up the newly created leaves
+            else:
+                await self._decompose_node(self._graph, node.id)
+                return None  # decomposition doesn't produce a finding
 
         # --- Step 2: Check if current depth is complete ---
         all_done = all(
@@ -703,7 +774,11 @@ class AgentManager:
             for n in nodes:
                 if n.is_leaf and n.status == "pending" and budget_ok:
                     return True
-                if not n.is_leaf and n.status == "pending":
+                if (
+                    not n.is_leaf
+                    and n.status == "pending"
+                    and (n.depth >= self._max_depth or self._should_expand_graph())
+                ):
                     return True
                 if not n.is_leaf and n.status == "analyzing" and not n.summary and budget_ok:
                     return True
@@ -811,7 +886,12 @@ class AgentManager:
 
         return None
 
-    async def _consolidate_node(self, node: TopicNode) -> Optional[dict[str, Any]]:
+    async def _consolidate_node(
+        self,
+        node: TopicNode,
+        *,
+        allow_restructure: bool = True,
+    ) -> Optional[dict[str, Any]]:
         """Consolidate child summaries into a parent summary."""
         assert self._graph is not None
 
@@ -855,12 +935,46 @@ class AgentManager:
         # Consolidation rejected — try restructuring then accept what we have
         missing = verdict.get("missing", "gaps in consolidated summary")
         logger.info("Consolidated review rejected for %r: %s", node.name, missing)
-        await self._restructure_graph_for_node(node, missing)
+        if allow_restructure:
+            await self._restructure_graph_for_node(node, missing)
+        else:
+            logger.info(
+                "Skipping restructure for %r during final graph cleanup.",
+                node.name,
+            )
 
         # Mark consolidated anyway to avoid infinite loops
         self._graph.mark_consolidated(node.id, consolidated)
         self._save_tree_json()
         return None
+
+    async def finalize_graph_state(self) -> int:
+        """Best-effort end-of-session cleanup for graph-backed runs.
+
+        Consolidates any nodes that are already ready for consolidation without
+        allowing rejected consolidations to create new restructure work.
+        Returns the number of nodes consolidated during cleanup.
+        """
+        if self._graph is None:
+            return 0
+
+        consolidated_count = 0
+        while True:
+            ready = self._graph.get_ready_for_consolidation()
+            if not ready:
+                break
+            node = ready[0]
+            was_status = node.status
+            await self._consolidate_node(node, allow_restructure=False)
+            if node.status == "consolidated" and was_status != "consolidated":
+                consolidated_count += 1
+
+        if consolidated_count:
+            logger.info(
+                "Final graph cleanup consolidated %d node(s).",
+                consolidated_count,
+            )
+        return consolidated_count
 
     async def _restructure_graph(self) -> None:
         """Request graph restructuring from the Planner after stuck detection."""

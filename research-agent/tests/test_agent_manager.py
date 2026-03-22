@@ -540,6 +540,36 @@ class TestBudgetIntegration:
             manager.budget.record_query(credits=0)
         assert manager._adaptive_max_children() == 0
 
+    def test_adaptive_max_children_low_time_hint(self, tmp_path):
+        """With low remaining session time, branching should shrink even with full budget."""
+        manager = self._build_manager(
+            "Test", str(tmp_path / "reports"), str(tmp_path / "db"),
+        )
+        manager.set_remaining_seconds_hint(20 * 60)
+        assert manager._adaptive_max_children() == 2
+
+    def test_adaptive_max_children_critical_time_hint(self, tmp_path):
+        """With very low remaining session time, no new branching should occur."""
+        manager = self._build_manager(
+            "Test", str(tmp_path / "reports"), str(tmp_path / "db"),
+        )
+        manager.set_remaining_seconds_hint(10 * 60)
+        assert manager._adaptive_max_children() == 0
+
+    def test_has_graph_work_ignores_pending_nonleaf_when_expansion_disabled(self, tmp_path):
+        """Pending non-leaf nodes should not keep the loop alive when expansion is disabled."""
+        from src.topic_graph import TopicGraph
+
+        manager = self._build_manager(
+            "Test", str(tmp_path / "reports"), str(tmp_path / "db"),
+        )
+        manager.set_remaining_seconds_hint(10 * 60)
+        g = TopicGraph(root_name="Test", root_query="test")
+        child = g.add_node(name="Branch", query="branch", parent_id=g.root.id)
+        manager._graph = g
+
+        assert not manager.has_graph_work()
+
 
 class TestTaskJsonSaveRestore:
     """Tests for AgentManager.save_task() and restore_task()."""
@@ -711,6 +741,34 @@ class TestTaskJsonSaveRestore:
         restored_child = manager._graph.find_by_name("NLP")
         assert restored_child.status == "pending"  # reset from 'researching'
 
+    def test_restore_task_marks_analyzing_max_depth_node_as_leaf_pending(self, tmp_path):
+        """Interrupted analyzing nodes at max depth should resume as pending leaves."""
+        from src.topic_graph import TopicGraph
+
+        task_path = tmp_path / "task.json"
+        g = TopicGraph(root_name="AI", root_query="AI")
+        parent = g.add_node(name="Parent", query="parent", parent_id=g.root.id)
+        child = g.add_node(name="Leaf Candidate", query="leaf candidate", parent_id=parent.id)
+        g.mark_analyzing(child.id)
+
+        state = {
+            "version": 1, "topic": "AI", "title": "AI", "user_prompt": None,
+            "current_research_depth": 2, "approved": [], "successful_queries": [],
+            "failed_queries": [], "consecutive_failures": 0,
+            "status": "in_progress", "last_saved_iso": "2026-01-01T00:00:00+00:00",
+            "graph": g.to_dict(),
+        }
+        task_path.write_text(json.dumps(state), encoding="utf-8")
+
+        manager = self._build_manager(
+            "AI", str(tmp_path / "reports"), str(tmp_path / "db"), max_depth=2,
+        )
+        manager.restore_task(task_path)
+
+        restored_child = manager._graph.find_by_name("Leaf Candidate")
+        assert restored_child.status == "pending"
+        assert restored_child.is_leaf is True
+
     def test_restore_task_returns_true_for_completed_status(self, tmp_path):
         """Completed tasks are restored (graph available for report gen) but return True."""
         task_path = tmp_path / "task.json"
@@ -849,6 +907,60 @@ class TestExtendGraphForDeeperResearch:
         manager = self._build_manager(tmp_path, max_depth=3)
         result = manager.extend_graph_for_deeper_research()
         assert result == 0
+
+
+class TestFinalizeGraphState:
+    """Tests for AgentManager.finalize_graph_state()."""
+
+    def _build_manager(self, tmp_path, **kwargs):
+        from src.agent_manager import AgentManager
+
+        with patch("src.agent_manager.PlannerAgent"), \
+             patch("src.agent_manager.ResearcherAgent"), \
+             patch("src.agent_manager.CriticAgent"), \
+             patch("src.agent_manager.KnowledgeBase"):
+            return AgentManager(
+                topic="Trading",
+                reports_dir=str(tmp_path / "reports"),
+                db_path=str(tmp_path / "db"),
+                **kwargs,
+            )
+
+    def test_finalize_graph_state_consolidates_ready_nodes(self, tmp_path, event_loop):
+        from src.topic_graph import TopicGraph
+
+        manager = self._build_manager(tmp_path)
+        g = TopicGraph(root_name="Trading", root_query="trading")
+        child = g.add_node(name="RSI", query="rsi", parent_id=g.root.id)
+        g.mark_leaf(child.id)
+        g.mark_researched(child.id, "RSI summary", [])
+        manager._graph = g
+        manager._planner.consolidate_summaries = AsyncMock(return_value="root consolidated")
+        manager._critic.review = AsyncMock(return_value={"status": "PROCEED"})
+
+        count = event_loop.run_until_complete(manager.finalize_graph_state())
+
+        assert count == 1
+        assert g.root.status == "consolidated"
+
+    def test_finalize_graph_state_skips_restructure_on_reject(self, tmp_path, event_loop):
+        from src.topic_graph import TopicGraph
+
+        manager = self._build_manager(tmp_path)
+        g = TopicGraph(root_name="Trading", root_query="trading")
+        child = g.add_node(name="RSI", query="rsi", parent_id=g.root.id)
+        g.mark_leaf(child.id)
+        g.mark_researched(child.id, "RSI summary", [])
+        manager._graph = g
+        manager._planner.consolidate_summaries = AsyncMock(return_value="root consolidated")
+        manager._critic.review = AsyncMock(return_value={"status": "REJECT", "missing": "gap"})
+        manager._restructure_graph_for_node = AsyncMock()
+
+        count = event_loop.run_until_complete(manager.finalize_graph_state())
+
+        assert count == 1
+        assert g.root.status == "consolidated"
+        manager._restructure_graph_for_node.assert_not_called()
 
 
 class TestInlineSourceLinks:
@@ -1116,3 +1228,278 @@ class TestOrphanPendingLeafRescue:
         event_loop.run_until_complete(manager.run_graph())
 
         assert "Orphan Leaf" in researched_nodes
+
+
+# ---------------------------------------------------------------------------
+# Close-out mode: pending non-leaf → leaf conversion
+# ---------------------------------------------------------------------------
+
+class TestCloseOutModeLeafConversion:
+    """run_graph close-out: pending non-leaf nodes should become leaves, not be skipped."""
+
+    def _build_manager(self, tmp_path):
+        from src.agent_manager import AgentManager
+
+        with patch("src.agent_manager.PlannerAgent"), \
+             patch("src.agent_manager.ResearcherAgent"), \
+             patch("src.agent_manager.CriticAgent"), \
+             patch("src.agent_manager.KnowledgeBase"):
+            return AgentManager(
+                topic="Trading",
+                reports_dir=str(tmp_path / "reports"),
+                db_path=str(tmp_path / "db"),
+            )
+
+    def test_closeout_converts_pending_nonleaf_to_leaf(self, tmp_path, event_loop):
+        """When expansion is disabled and there are pending non-leaf nodes,
+        close-out mode converts them to leaves so they can still be researched."""
+        from src.topic_graph import TopicGraph
+        from src.agent_manager import _MIN_EXPANSION_SECONDS
+
+        manager = self._build_manager(tmp_path)
+        # Disable expansion by setting a critically low time hint
+        manager.set_remaining_seconds_hint(_MIN_EXPANSION_SECONDS - 60)
+
+        g = TopicGraph(root_name="Trading", root_query="trading")
+        # A pending non-leaf at depth 0 (below max depth) — would normally need decomposition
+        non_leaf = g.add_node(name="DeepBranch", query="deep branch", parent_id=g.root.id)
+        # non_leaf is not a leaf and stays "pending" (no mark_leaf call)
+        assert not non_leaf.is_leaf
+        assert non_leaf.status == "pending"
+
+        manager._graph = g
+        manager._current_research_depth = 1
+
+        result = event_loop.run_until_complete(manager.run_graph())
+
+        # After close-out conversion, the node should now be a leaf with pending status
+        assert non_leaf.is_leaf, "Node should have been converted to a leaf"
+        assert non_leaf.status == "pending"
+        assert result is None  # returns None; next call will research the leaf
+
+    def test_closeout_does_not_convert_when_expansion_is_allowed(self, tmp_path, event_loop):
+        """With plenty of time remaining, pending non-leaf nodes should be decomposed, not converted."""
+        from src.topic_graph import TopicGraph
+
+        manager = self._build_manager(tmp_path)
+        # Give plenty of time — expansion should be enabled
+        manager.set_remaining_seconds_hint(3600.0)
+
+        g = TopicGraph(root_name="Trading", root_query="trading")
+        non_leaf = g.add_node(name="Branch", query="branch", parent_id=g.root.id)
+        assert not non_leaf.is_leaf
+
+        manager._graph = g
+        manager._current_research_depth = 1
+
+        decompose_called = []
+
+        async def fake_decompose(graph, node_id, context=""):
+            decompose_called.append(node_id)
+
+        manager._decompose_node = fake_decompose
+
+        result = event_loop.run_until_complete(manager.run_graph())
+
+        assert non_leaf.id in decompose_called, "Decompose should have been called in normal mode"
+        assert not non_leaf.is_leaf, "Node should NOT have been converted to leaf"
+
+
+# ---------------------------------------------------------------------------
+# Branch-priority pruning
+# ---------------------------------------------------------------------------
+
+class TestBranchPriorityPruning:
+    """run_graph: low-priority leaves are deferred when the graph is saturated."""
+
+    def _build_manager(self, tmp_path):
+        from src.agent_manager import AgentManager
+
+        with patch("src.agent_manager.PlannerAgent"), \
+             patch("src.agent_manager.ResearcherAgent"), \
+             patch("src.agent_manager.CriticAgent"), \
+             patch("src.agent_manager.KnowledgeBase"):
+            return AgentManager(
+                topic="Trading",
+                reports_dir=str(tmp_path / "reports"),
+                db_path=str(tmp_path / "db"),
+            )
+
+    def test_high_priority_leaf_is_chosen_when_saturated(self, tmp_path, event_loop):
+        """When unresolved > threshold, the highest-priority leaf at or above
+        _MIN_LEAF_PRIORITY should be selected, skipping lower-priority ones."""
+        from src.topic_graph import TopicGraph
+        from src.agent_manager import _PRIORITY_PRUNE_THRESHOLD, _MIN_LEAF_PRIORITY
+
+        manager = self._build_manager(tmp_path)
+        g = TopicGraph(root_name="Trading", root_query="trading")
+
+        # Fill graph with pending nodes to exceed threshold
+        pending_siblings = []
+        for i in range(_PRIORITY_PRUNE_THRESHOLD + 5):
+            sib = g.add_node(name=f"Child{i}", query=f"child{i}", parent_id=g.root.id)
+            g.mark_leaf(sib.id)
+            sib.priority = 5
+            pending_siblings.append(sib)
+
+        # Add a high-priority and a low-priority leaf at depth 1
+        high = g.add_node(name="HighPriority", query="high priority", parent_id=g.root.id)
+        g.mark_leaf(high.id)
+        high.priority = 8
+
+        low = g.add_node(name="LowPriority", query="low priority", parent_id=g.root.id)
+        g.mark_leaf(low.id)
+        low.priority = 1  # below _MIN_LEAF_PRIORITY
+
+        manager._graph = g
+        manager._current_research_depth = 1
+
+        researched_nodes = []
+
+        async def fake_research(node):
+            researched_nodes.append(node.name)
+            return {"subtopic": node.name, "summary": "ok", "source_urls": []}
+
+        manager._research_node = fake_research
+
+        event_loop.run_until_complete(manager.run_graph())
+
+        # The low-priority leaf should be deferred; high-priority should be picked
+        for name in researched_nodes:
+            assert name != "LowPriority", (
+                f"Low-priority leaf should not be researched when graph is saturated. "
+                f"Researched: {researched_nodes}"
+            )
+
+    def test_no_pruning_when_not_saturated(self, tmp_path, event_loop):
+        """With few unresolved nodes, even low-priority leaves should be researched."""
+        from src.topic_graph import TopicGraph
+        from src.agent_manager import _MIN_LEAF_PRIORITY
+
+        manager = self._build_manager(tmp_path)
+        g = TopicGraph(root_name="Trading", root_query="trading")
+
+        low = g.add_node(name="LowPriority", query="low priority", parent_id=g.root.id)
+        g.mark_leaf(low.id)
+        low.priority = _MIN_LEAF_PRIORITY - 1  # below threshold
+
+        manager._graph = g
+        manager._current_research_depth = 1
+
+        researched_nodes = []
+
+        async def fake_research(node):
+            researched_nodes.append(node.name)
+            return None
+
+        manager._research_node = fake_research
+
+        event_loop.run_until_complete(manager.run_graph())
+
+        # Low-priority is fine when graph is small (few unresolved)
+        assert "LowPriority" in researched_nodes
+
+
+# ---------------------------------------------------------------------------
+# Failed-subtree compaction in restore_task
+# ---------------------------------------------------------------------------
+
+class TestRestoreTaskPrunesFailedSubtrees:
+    """restore_task should compact all-failed subtrees from loaded task.json."""
+
+    def _build_manager(self, tmp_path):
+        from src.agent_manager import AgentManager
+
+        with patch("src.agent_manager.PlannerAgent"), \
+             patch("src.agent_manager.ResearcherAgent"), \
+             patch("src.agent_manager.CriticAgent"), \
+             patch("src.agent_manager.KnowledgeBase"):
+            return AgentManager(
+                topic="Trading",
+                reports_dir=str(tmp_path / "reports"),
+                db_path=str(tmp_path / "db"),
+            )
+
+    def test_restore_prunes_all_failed_subtree(self, tmp_path):
+        """A fully-failed subtree in task.json is removed on restore."""
+        import json
+        from src.topic_graph import TopicGraph
+
+        manager = self._build_manager(tmp_path)
+
+        # Build a graph with one good and one all-failed subtree
+        g = TopicGraph(root_name="Trading", root_query="trading")
+        g.root.status = "completed"
+        good = g.add_node(name="GoodNode", query="good", parent_id=g.root.id)
+        g.mark_leaf(good.id)
+        g.mark_researched(good.id, "good summary", [])
+
+        bad_parent = g.add_node(name="BadParent", query="bad parent", parent_id=g.root.id)
+        bad_child = g.add_node(name="BadChild", query="bad child", parent_id=bad_parent.id)
+        bad_parent.status = "failed"
+        bad_child.status = "failed"
+        g.mark_leaf(bad_child.id)
+
+        task_path = tmp_path / "task.json"
+        state = {
+            "version": 1,
+            "topic": "Trading",
+            "title": "Trading",
+            "user_prompt": "",
+            "current_research_depth": 0,
+            "approved": [],
+            "successful_queries": [],
+            "failed_queries": [],
+            "consecutive_failures": 0,
+            "status": "in_progress",
+            "last_saved_iso": "2024-01-01T00:00:00+00:00",
+            "graph": g.to_dict(),
+        }
+        task_path.write_text(json.dumps(state), encoding="utf-8")
+
+        manager.restore_task(task_path)
+
+        assert manager._graph is not None
+        restored_names = [n.name for n in manager._graph.get_all_nodes()]
+        assert "GoodNode" in restored_names
+        assert "BadParent" not in restored_names, "All-failed subtree root should be pruned"
+        assert "BadChild" not in restored_names, "All-failed subtree child should be pruned"
+
+    def test_restore_does_not_prune_partial_failures(self, tmp_path):
+        """A subtree with at least one non-failed node must be preserved on restore."""
+        import json
+        from src.topic_graph import TopicGraph
+
+        manager = self._build_manager(tmp_path)
+
+        g = TopicGraph(root_name="Trading", root_query="trading")
+        g.root.status = "completed"
+        parent = g.add_node(name="MixedParent", query="mixed", parent_id=g.root.id)
+        parent.status = "failed"
+        good_child = g.add_node(name="GoodChild", query="good child", parent_id=parent.id)
+        g.mark_leaf(good_child.id)
+        g.mark_researched(good_child.id, "some content", [])
+
+        task_path = tmp_path / "task.json"
+        state = {
+            "version": 1,
+            "topic": "Trading",
+            "title": "Trading",
+            "user_prompt": "",
+            "current_research_depth": 0,
+            "approved": [],
+            "successful_queries": [],
+            "failed_queries": [],
+            "consecutive_failures": 0,
+            "status": "in_progress",
+            "last_saved_iso": "2024-01-01T00:00:00+00:00",
+            "graph": g.to_dict(),
+        }
+        task_path.write_text(json.dumps(state), encoding="utf-8")
+
+        manager.restore_task(task_path)
+
+        assert manager._graph is not None
+        restored_names = [n.name for n in manager._graph.get_all_nodes()]
+        assert "GoodChild" in restored_names
+        assert "MixedParent" in restored_names
