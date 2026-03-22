@@ -29,6 +29,17 @@ _VALID_STATUSES = {"pending", "analyzing", "researching", "completed", "consolid
 MAX_DEPTH = 2
 
 
+def _display_name(name: str, query: str, node_id: str) -> str:
+    """Return a user-facing node name with defensive fallback."""
+    clean_name = (name or "").strip()
+    if clean_name:
+        return clean_name
+    clean_query = (query or "").strip()
+    if clean_query:
+        return clean_query
+    return f"[Unnamed-{node_id[:6]}]"
+
+
 @dataclass
 class TopicNode:
     """A single node in the research topic hierarchy."""
@@ -70,10 +81,12 @@ class TopicNode:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "TopicNode":
         """Deserialize from a plain dict."""
+        query = str(data.get("query", "") or "").strip()
+        node_id = str(data["id"])
         return cls(
-            id=data["id"],
-            name=data["name"],
-            query=data["query"],
+            id=node_id,
+            name=_display_name(str(data.get("name", "") or ""), query, node_id),
+            query=query or _display_name(str(data.get("name", "") or ""), query, node_id),
             depth=data.get("depth", 0),
             parent_ids=list(data.get("parent_ids", [])),
             children_ids=list(data.get("children_ids", [])),
@@ -139,6 +152,12 @@ class TopicGraph:
         if parent is None:
             raise ValueError(f"Unknown parent node: {parent_id!r}")
 
+        name = (name or "").strip()
+        if not name:
+            raise ValueError(f"Node name cannot be empty for parent {parent_id!r}")
+
+        query = (query or "").strip() or name
+
         node_depth = depth if depth is not None else parent.depth + 1
 
         # Cross-reference deduplication: existing node with same name?
@@ -198,6 +217,8 @@ class TopicGraph:
     def find_by_name(self, name: str) -> Optional[TopicNode]:
         """Find a node by case-insensitive name match."""
         lower = name.lower().strip()
+        if not lower:
+            return None
         for node in self._nodes.values():
             if node.name.lower().strip() == lower:
                 return node
@@ -332,24 +353,74 @@ class TopicGraph:
     # Outline / Display
     # ------------------------------------------------------------------
 
-    def get_outline(self) -> str:
-        """Return an indented text outline of the graph for report headers."""
+    def get_outline(
+        self,
+        *,
+        report_mode: bool = False,
+        include_status: bool = True,
+    ) -> str:
+        """Return an indented text outline of the graph.
+
+        When *report_mode* is True, only nodes with content or descendants with
+        content are shown so the user-facing report is cleaner than the raw
+        diagnostic graph state.
+        """
         lines: list[str] = []
-        self._outline_recurse(self._root_id, 0, lines, set())
+        self._outline_recurse(
+            self._root_id,
+            0,
+            lines,
+            set(),
+            report_mode=report_mode,
+            include_status=include_status,
+        )
         return "\n".join(lines)
 
     def _outline_recurse(
-        self, node_id: str, indent: int, lines: list[str], seen: set[str]
+        self,
+        node_id: str,
+        indent: int,
+        lines: list[str],
+        seen: set[str],
+        *,
+        report_mode: bool,
+        include_status: bool,
     ) -> None:
         if node_id in seen or node_id not in self._nodes:
             return
         seen.add(node_id)
         node = self._nodes[node_id]
+        if report_mode and not self._has_report_content(node_id, set()):
+            return
         prefix = "  " * indent + "- "
-        status_tag = f" [{node.status}]"
-        lines.append(f"{prefix}{node.name}{status_tag}")
+        status_tag = f" [{node.status}]" if include_status else ""
+        lines.append(f"{prefix}{_display_name(node.name, node.query, node.id)}{status_tag}")
         for cid in node.children_ids:
-            self._outline_recurse(cid, indent + 1, lines, seen)
+            self._outline_recurse(
+                cid,
+                indent + 1,
+                lines,
+                seen,
+                report_mode=report_mode,
+                include_status=include_status,
+            )
+
+    def _has_report_content(self, node_id: str, seen: set[str]) -> bool:
+        """Return True if this node or any descendant has user-facing content."""
+        if node_id in seen or node_id not in self._nodes:
+            return False
+        seen.add(node_id)
+        node = self._nodes[node_id]
+        if node.summary or node.consolidated_summary:
+            return True
+        return any(self._has_report_content(cid, seen) for cid in node.children_ids)
+
+    def get_status_counts(self) -> dict[str, int]:
+        """Return counts of nodes by status."""
+        counts = {status: 0 for status in _VALID_STATUSES}
+        for node in self._nodes.values():
+            counts[node.status] = counts.get(node.status, 0) + 1
+        return counts
 
     # ------------------------------------------------------------------
     # Serialization
@@ -390,7 +461,7 @@ class TopicGraph:
             return None
 
         entry: dict[str, Any] = {
-            "name": node.name,
+            "name": _display_name(node.name, node.query, node.id),
             "depth": node.depth,
             "status": node.status,
         }

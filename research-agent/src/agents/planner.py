@@ -205,6 +205,34 @@ class PlannerAgent:
                     continue
         return None
 
+    def _normalise_task_dict(
+        self,
+        task: dict[str, Any],
+        topic: str,
+        *,
+        name_key: str,
+        query_key: str,
+        fallback_name: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
+        """Return a sanitised task dict or ``None`` when it is unusable."""
+        if not isinstance(task, dict):
+            return None
+
+        raw_name = str(task.get(name_key, "") or "").strip()
+        raw_query = str(task.get(query_key, "") or "").strip()
+
+        cleaned_query = self._clean_query(raw_query, topic).strip() if raw_query else ""
+        name = raw_name or cleaned_query or (fallback_name or topic).strip()
+        query = cleaned_query or raw_name or (fallback_name or topic).strip()
+
+        if not name.strip() or not query.strip():
+            logger.warning("Planner produced unusable task for %r: %r", topic, task)
+            return None
+
+        task[name_key] = name.strip()
+        task[query_key] = query.strip()
+        return task
+
     def _fallback_tasks(self, topic: str) -> list[dict[str, str]]:
         """Return default tasks when the LLM is unavailable."""
         # Generate topic-agnostic fallback queries
@@ -264,11 +292,19 @@ class PlannerAgent:
 
         tasks = self._parse_json(raw)
         if isinstance(tasks, list) and tasks:
+            cleaned_tasks: list[dict[str, Any]] = []
             for task in tasks:
-                if isinstance(task, dict) and "query" in task:
-                    task["query"] = self._clean_query(task["query"], topic)
-            logger.info("Planner generated %d tasks for topic %r.", len(tasks), topic)
-            return tasks
+                normalised = self._normalise_task_dict(
+                    task,
+                    topic,
+                    name_key="subtopic",
+                    query_key="query",
+                )
+                if normalised is not None:
+                    cleaned_tasks.append(normalised)
+            if cleaned_tasks:
+                logger.info("Planner generated %d tasks for topic %r.", len(cleaned_tasks), topic)
+                return cleaned_tasks
 
         logger.warning(
             "Planner LLM returned unusable output; using fallback tasks for %r.", topic
@@ -299,14 +335,22 @@ class PlannerAgent:
 
         tasks = self._parse_json(raw)
         if isinstance(tasks, list) and tasks:
+            cleaned_tasks: list[dict[str, Any]] = []
             for task in tasks:
-                if isinstance(task, dict) and "query" in task:
-                    task["query"] = self._clean_query(task["query"], topic)
-            logger.info(
-                "Retrospective planner generated %d tasks for topic %r.",
-                len(tasks), topic,
-            )
-            return tasks
+                normalised = self._normalise_task_dict(
+                    task,
+                    topic,
+                    name_key="subtopic",
+                    query_key="query",
+                )
+                if normalised is not None:
+                    cleaned_tasks.append(normalised)
+            if cleaned_tasks:
+                logger.info(
+                    "Retrospective planner generated %d tasks for topic %r.",
+                    len(cleaned_tasks), topic,
+                )
+                return cleaned_tasks
 
         logger.warning(
             "Retrospective planner returned unusable output; using fallback for %r.", topic
@@ -428,27 +472,36 @@ class PlannerAgent:
                 clean_topic = re.sub(r"[（(][^）)]*[）)]", "", topic).strip()
                 cjk_prefix = clean_topic[:8].strip()
 
+            cleaned_tasks: list[dict[str, Any]] = []
             for task in tasks:
-                if isinstance(task, dict) and "query" in task:
-                    task["query"] = self._clean_query(task["query"], topic)
-                    # For CJK: if the query is short and doesn't already contain
-                    # domain context, prepend the topic prefix.
-                    q = task["query"]
-                    if (
-                        cjk_prefix
-                        and _contains_cjk(q)
-                        and len(q.replace(" ", "")) <= 6
-                        and cjk_prefix not in q
-                    ):
-                        task["query"] = f"{cjk_prefix} {q}".strip()
-                    task.setdefault("priority", 5)
-                    task.setdefault("description", "")
-                    task.setdefault("name", task.get("query", topic))
-            logger.info(
-                "Hierarchical planner generated %d sub-topics for %r.",
-                len(tasks), topic,
-            )
-            return tasks
+                normalised = self._normalise_task_dict(
+                    task,
+                    topic,
+                    name_key="name",
+                    query_key="query",
+                    fallback_name=topic,
+                )
+                if normalised is None:
+                    continue
+                # For CJK: if the query is short and doesn't already contain
+                # domain context, prepend the topic prefix.
+                q = normalised["query"]
+                if (
+                    cjk_prefix
+                    and _contains_cjk(q)
+                    and len(q.replace(" ", "")) <= 6
+                    and cjk_prefix not in q
+                ):
+                    normalised["query"] = f"{cjk_prefix} {q}".strip()
+                normalised.setdefault("priority", 5)
+                normalised.setdefault("description", "")
+                cleaned_tasks.append(normalised)
+            if cleaned_tasks:
+                logger.info(
+                    "Hierarchical planner generated %d sub-topics for %r.",
+                    len(cleaned_tasks), topic,
+                )
+                return cleaned_tasks
 
         # Fallback: generate 3 generic sub-topics
         logger.warning(

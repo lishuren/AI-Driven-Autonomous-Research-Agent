@@ -443,6 +443,7 @@ class AgentManager:
 
         if node.depth >= self._max_depth:
             graph.mark_leaf(node_id)
+            node.status = "pending"
             logger.info("Max depth reached for %r — marking as leaf.", node.name)
             return
 
@@ -500,18 +501,29 @@ class AgentManager:
             node.status = "pending"
             return
 
+        added_children = 0
         for st in sub_topics:
             if not self.budget.can_create_node():
                 logger.info("Node budget exhausted — stopping decomposition of %r.", node.name)
                 break
-            graph.add_node(
-                name=st.get("name", st.get("query", "")),
-                query=st.get("query", ""),
-                parent_id=node_id,
-                priority=st.get("priority", 5),
-                description=st.get("description", ""),
-            )
+            try:
+                graph.add_node(
+                    name=st.get("name", st.get("query", "")),
+                    query=st.get("query", ""),
+                    parent_id=node_id,
+                    priority=st.get("priority", 5),
+                    description=st.get("description", ""),
+                )
+            except ValueError as exc:
+                logger.warning("Skipping invalid sub-topic under %r: %s", node.name, exc)
+                continue
+            added_children += 1
             self.budget.record_node()
+
+        if added_children == 0:
+            graph.mark_leaf(node_id)
+            node.status = "pending"
+            logger.info("No valid sub-topics for %r — forcing leaf.", node.name)
 
     # ------------------------------------------------------------------
     # Graph-Based Research Orchestration
@@ -876,9 +888,37 @@ class AgentManager:
         """Apply restructure suggestions to the graph."""
         if self._graph is None:
             return
-        for suggestion in suggestions:
-            if suggestion.get("action") != "add":
-                continue
+        add_suggestions = [
+            suggestion for suggestion in suggestions
+            if suggestion.get("action") == "add"
+        ]
+        add_suggestions.sort(key=lambda s: s.get("priority", 5), reverse=True)
+
+        budget_used = 1.0 - self.budget.budget_fraction_remaining()
+        status_counts = self._graph.get_status_counts()
+        unresolved_count = (
+            status_counts.get("pending", 0)
+            + status_counts.get("analyzing", 0)
+            + status_counts.get("failed", 0)
+        )
+
+        if not self.budget.can_create_node():
+            max_additions = 0
+        elif budget_used >= 0.75 or unresolved_count >= 12:
+            max_additions = 1
+        elif budget_used >= 0.50 or unresolved_count >= 8:
+            max_additions = 2
+        else:
+            max_additions = 3
+
+        if len(add_suggestions) > max_additions:
+            logger.info(
+                "Restructure: limiting add suggestions from %d to %d "
+                "(budget_used=%.0f%%, unresolved=%d).",
+                len(add_suggestions), max_additions, budget_used * 100, unresolved_count,
+            )
+
+        for suggestion in add_suggestions[:max_additions]:
             node_name = suggestion.get("name", "")
             # Skip if a node with this name already exists — resetting an
             # existing node's status would strand it at its original depth,
@@ -1055,9 +1095,22 @@ class AgentManager:
         # Graph outline section
         graph_outline_section = ""
         if self._graph is not None:
-            outline = self._graph.get_outline()
+            outline = self._graph.get_outline(report_mode=True)
             if outline:
-                graph_outline_section = f"## Research Plan\n\n```\n{outline}\n```\n"
+                counts = self._graph.get_status_counts()
+                unresolved_parts = []
+                for status in ("pending", "analyzing", "failed"):
+                    count = counts.get(status, 0)
+                    if count:
+                        unresolved_parts.append(f"{count} {status}")
+                unresolved_line = ""
+                if unresolved_parts:
+                    unresolved_line = (
+                        "\n_Unresolved graph state retained in task data: "
+                        + ", ".join(unresolved_parts)
+                        + "._\n"
+                    )
+                graph_outline_section = f"## Research Plan\n\n```\n{outline}\n```{unresolved_line}\n"
 
         # Only include technical sections when there is actual content
         technical_parts: list[str] = []
@@ -1130,8 +1183,9 @@ class AgentManager:
                 else:
                     heading_level = min(node.depth + 2, 6)  # depth 1→###, 2→####
                     prefix = "#" * heading_level
+                    heading_text = node.name.strip() or node.query.strip() or f"[Unnamed-{node.id[:6]}]"
                     lines.append(
-                        f"{prefix} {node.name}\n\n{summary}{inline_refs}"
+                        f"{prefix} {heading_text}\n\n{summary}{inline_refs}"
                     )
                 extract_fn(summary)
                 sources.extend(node.source_urls)

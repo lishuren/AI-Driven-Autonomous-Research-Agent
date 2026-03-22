@@ -412,6 +412,50 @@ class TestGraphReport:
         assert "### Sub A" in content
         assert "Summary of A." in content
 
+    def test_generate_report_uses_clean_outline_and_unresolved_summary(self, tmp_path):
+        """Graph report hides unresolved branches from outline but summarizes them."""
+        from src.topic_graph import TopicGraph
+
+        manager = self._build_manager("AI Research", str(tmp_path / "reports"), str(tmp_path / "db"))
+        g = TopicGraph(root_name="AI Research", root_query="AI")
+        g.root.summary = "AI overview prose"
+        resolved = g.add_node(name="NLP", query="NLP", parent_id=g.root.id)
+        unresolved = g.add_node(name="Vision", query="CV", parent_id=g.root.id)
+        failed = g.add_node(name="Robotics", query="robotics", parent_id=g.root.id)
+        g.mark_leaf(resolved.id)
+        g.mark_leaf(unresolved.id)
+        g.mark_leaf(failed.id)
+        g.mark_researched(resolved.id, "NLP is about language.", ["https://nlp.example.com"])
+        g.mark_failed(failed.id)
+        manager._graph = g
+
+        report_path = manager.generate_report()
+        content = report_path.read_text()
+
+        assert "- NLP [completed]" in content
+        assert "Vision" not in content
+        assert "Robotics" not in content
+        assert "Unresolved graph state retained in task data" in content
+        assert "2 pending" in content
+        assert "1 failed" in content
+
+    def test_graph_findings_block_uses_fallback_heading_for_blank_name(self, tmp_path):
+        """Legacy blank-name nodes with content should still render a non-blank heading."""
+        from src.topic_graph import TopicGraph
+
+        manager = self._build_manager("AI Research", str(tmp_path / "reports"), str(tmp_path / "db"))
+        g = TopicGraph(root_name="AI Research", root_query="AI")
+        child = g.add_node(name="Vision", query="computer vision", parent_id=g.root.id)
+        child.name = ""
+        g.mark_leaf(child.id)
+        g.mark_researched(child.id, "Vision is about images.", [])
+        manager._graph = g
+
+        report_path = manager.generate_report()
+        content = report_path.read_text()
+
+        assert "### computer vision" in content
+
 
 class TestBudgetIntegration:
     """Tests for budget integration in AgentManager."""
@@ -899,7 +943,7 @@ class TestInlineSourceLinks:
 class TestRestructureSkipsExistingNodes:
     """_apply_restructure_suggestions must not reset already-completed nodes."""
 
-    def _build_manager(self, tmp_path):
+    def _build_manager(self, tmp_path, **kwargs):
         from src.agent_manager import AgentManager
 
         with patch("src.agent_manager.PlannerAgent"), \
@@ -910,6 +954,7 @@ class TestRestructureSkipsExistingNodes:
                 topic="Trading",
                 reports_dir=str(tmp_path / "reports"),
                 db_path=str(tmp_path / "db"),
+                **kwargs,
             )
 
     def test_existing_node_not_reset_to_pending(self, tmp_path):
@@ -979,6 +1024,46 @@ class TestRestructureSkipsExistingNodes:
         assert vwap is not None
         assert vwap.status == "pending"
         assert vwap.is_leaf is True
+
+    def test_restructure_limits_suggestions_when_graph_is_noisy(self, tmp_path):
+        """Only the highest-priority restructure additions are kept when unresolved work is high."""
+        from src.topic_graph import TopicGraph
+
+        manager = self._build_manager(tmp_path)
+        g = TopicGraph(root_name="Trading", root_query="trading")
+        manager._graph = g
+
+        for idx in range(8):
+            node = g.add_node(name=f"Pending {idx}", query=f"pending {idx}", parent_id=g.root.id)
+            g.mark_leaf(node.id)
+
+        suggestions = [
+            {"action": "add", "name": "Low Priority", "query": "low", "parent_name": "Trading", "priority": 1},
+            {"action": "add", "name": "High Priority", "query": "high", "parent_name": "Trading", "priority": 9},
+            {"action": "add", "name": "Medium Priority", "query": "medium", "parent_name": "Trading", "priority": 5},
+        ]
+
+        manager._apply_restructure_suggestions(suggestions)
+
+        assert g.find_by_name("High Priority") is not None
+        assert g.find_by_name("Medium Priority") is not None
+        assert g.find_by_name("Low Priority") is None
+
+    def test_restructure_skips_all_adds_when_node_budget_exhausted(self, tmp_path):
+        """No restructure nodes are added when node budget is exhausted."""
+        from src.topic_graph import TopicGraph
+
+        manager = self._build_manager(tmp_path, max_nodes=0)
+        g = TopicGraph(root_name="Trading", root_query="trading")
+        manager._graph = g
+
+        suggestions = [
+            {"action": "add", "name": "Blocked", "query": "blocked", "parent_name": "Trading", "priority": 9},
+        ]
+
+        manager._apply_restructure_suggestions(suggestions)
+
+        assert g.find_by_name("Blocked") is None
 
 
 class TestOrphanPendingLeafRescue:

@@ -34,6 +34,13 @@ class TestTopicGraph:
         assert child.id in g.root.children_ids
         assert g.node_count() == 2
 
+    def test_add_node_rejects_empty_name(self):
+        from src.topic_graph import TopicGraph
+
+        g = TopicGraph(root_name="AI", root_query="AI")
+        with pytest.raises(ValueError, match="cannot be empty"):
+            g.add_node(name="   ", query="query", parent_id=g.root.id)
+
     def test_cross_reference_dedup(self):
         from src.topic_graph import TopicGraph
 
@@ -120,6 +127,28 @@ class TestTopicGraph:
         assert "AI" in outline
         assert "NLP" in outline
         assert "Vision" in outline
+
+    def test_get_outline_report_mode_hides_unresolved_branches(self):
+        from src.topic_graph import TopicGraph
+
+        g = TopicGraph(root_name="AI", root_query="AI")
+        c1 = g.add_node(name="NLP", query="NLP", parent_id=g.root.id)
+        c2 = g.add_node(name="Vision", query="CV", parent_id=g.root.id)
+        g.mark_leaf(c1.id)
+        g.mark_leaf(c2.id)
+        g.mark_researched(c1.id, "summary", [])
+
+        outline = g.get_outline(report_mode=True)
+
+        assert "AI" in outline
+        assert "NLP" in outline
+        assert "Vision" not in outline
+
+    def test_from_dict_replaces_blank_name(self):
+        from src.topic_graph import TopicNode
+
+        node = TopicNode.from_dict({"id": "abc123", "name": " ", "query": "fallback query"})
+        assert node.name == "fallback query"
 
     def test_save_and_load_json(self, tmp_path):
         from src.topic_graph import TopicGraph
