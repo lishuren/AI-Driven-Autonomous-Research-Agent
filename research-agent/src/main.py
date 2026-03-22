@@ -696,14 +696,21 @@ async def run(
                     await asyncio.sleep(_ERROR_SLEEP_SECONDS)
                     continue
             else:
-                # Both graph and queue exhausted before the deadline
+                # Both graph and queue exhausted before the deadline.
+                # NOTE: internally _max_depth = CLI --max-depth minus 1, so
+                # the equivalent CLI arg for the current depth is _max_depth + 1
+                # and the next useful value is _max_depth + 2.
                 remaining_min = (end_time - time.monotonic()) / 60
+                cli_max_depth_current = manager._max_depth + 1
+                cli_max_depth_next = manager._max_depth + 2
                 logger.info(
                     "All research work complete (%.0f min remaining in session). "
-                    "For deeper research re-run with --max-depth %d (current: %d).",
+                    "You ran with --max-depth %d (internal depth %d). "
+                    "For deeper research re-run with --max-depth %d.",
                     remaining_min,
-                    manager._max_depth + 1,
+                    cli_max_depth_current,
                     manager._max_depth,
+                    cli_max_depth_next,
                 )
                 break
 
