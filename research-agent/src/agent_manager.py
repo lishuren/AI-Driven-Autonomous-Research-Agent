@@ -762,8 +762,12 @@ class AgentManager:
         """Return True if there are still nodes to research, decompose, or consolidate."""
         if self._graph is None:
             return False
+        # If the root is consolidated but there are still pending nodes (possible
+        # after a restore or restructure), treat the graph as having work to do.
         if self._graph.is_complete():
-            return False
+            any_pending = any(n.status == "pending" for n in self._graph.get_all_nodes())
+            if not any_pending:
+                return False
 
         # Budget exhaustion — only consolidation work may remain
         budget_ok = not self.budget.is_exhausted()
