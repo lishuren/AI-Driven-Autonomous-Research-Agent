@@ -802,3 +802,140 @@ class TestInlineSourceLinks:
         content = report_path.read_text(encoding="utf-8")
 
         assert "*Sources:" not in content
+
+
+class TestRestructureSkipsExistingNodes:
+    """_apply_restructure_suggestions must not reset already-completed nodes."""
+
+    def _build_manager(self, tmp_path):
+        from src.agent_manager import AgentManager
+
+        with patch("src.agent_manager.PlannerAgent"), \
+             patch("src.agent_manager.ResearcherAgent"), \
+             patch("src.agent_manager.CriticAgent"), \
+             patch("src.agent_manager.KnowledgeBase"):
+            return AgentManager(
+                topic="Trading",
+                reports_dir=str(tmp_path / "reports"),
+                db_path=str(tmp_path / "db"),
+            )
+
+    def test_existing_node_not_reset_to_pending(self, tmp_path):
+        """A restructure suggestion for a completed node must be skipped — the
+        node's status must not be reverted to 'pending'."""
+        from src.topic_graph import TopicGraph
+
+        manager = self._build_manager(tmp_path)
+        g = TopicGraph(root_name="Trading", root_query="trading")
+        child = g.add_node(name="RSI Strategy", query="rsi strategy", parent_id=g.root.id)
+        g.mark_leaf(child.id)
+        g.mark_researched(child.id, "RSI overview.", [])
+        manager._graph = g
+
+        # Planner suggests re-adding the same node
+        suggestions = [
+            {"action": "add", "name": "RSI Strategy", "query": "rsi q", "parent_name": "Trading", "priority": 5},
+        ]
+        manager._apply_restructure_suggestions(suggestions)
+
+        # Node must remain completed, not be reverted to pending
+        node = g.find_by_name("RSI Strategy")
+        assert node is not None
+        assert node.status == "completed"
+
+    def test_new_node_is_added_normally(self, tmp_path):
+        """Suggestions for genuinely new node names are still applied."""
+        from src.topic_graph import TopicGraph
+
+        manager = self._build_manager(tmp_path)
+        g = TopicGraph(root_name="Trading", root_query="trading")
+        manager._graph = g
+
+        suggestions = [
+            {"action": "add", "name": "MACD Divergence", "query": "macd divergence", "parent_name": "Trading", "priority": 5},
+        ]
+        manager._apply_restructure_suggestions(suggestions)
+
+        node = g.find_by_name("MACD Divergence")
+        assert node is not None
+        assert node.is_leaf is True
+        assert node.status == "pending"
+
+    def test_mixed_suggestions_only_new_added(self, tmp_path):
+        """Mixed batch: existing node skipped, new node added."""
+        from src.topic_graph import TopicGraph
+
+        manager = self._build_manager(tmp_path)
+        g = TopicGraph(root_name="Trading", root_query="trading")
+        existing = g.add_node(name="Bollinger Bands", query="bollinger", parent_id=g.root.id)
+        g.mark_leaf(existing.id)
+        g.mark_researched(existing.id, "BB summary.", [])
+        manager._graph = g
+
+        suggestions = [
+            {"action": "add", "name": "Bollinger Bands", "query": "bb2", "parent_name": "Trading", "priority": 5},
+            {"action": "add", "name": "VWAP Strategy", "query": "vwap", "parent_name": "Trading", "priority": 5},
+        ]
+        manager._apply_restructure_suggestions(suggestions)
+
+        # Bollinger Bands must remain completed
+        bb = g.find_by_name("Bollinger Bands")
+        assert bb.status == "completed"
+
+        # VWAP was genuinely new and must have been added as pending leaf
+        vwap = g.find_by_name("VWAP Strategy")
+        assert vwap is not None
+        assert vwap.status == "pending"
+        assert vwap.is_leaf is True
+
+
+class TestOrphanPendingLeafRescue:
+    """run_graph step 4: pending leaf nodes at non-current depth are rescued."""
+
+    def _build_manager(self, tmp_path):
+        from src.agent_manager import AgentManager
+
+        with patch("src.agent_manager.PlannerAgent"), \
+             patch("src.agent_manager.ResearcherAgent"), \
+             patch("src.agent_manager.CriticAgent"), \
+             patch("src.agent_manager.KnowledgeBase"):
+            return AgentManager(
+                topic="Trading",
+                reports_dir=str(tmp_path / "reports"),
+                db_path=str(tmp_path / "db"),
+            )
+
+    def test_orphan_leaf_at_lower_depth_is_researched(self, tmp_path, event_loop):
+        """A pending leaf stranded at depth 1 while current_depth=2 must not be skipped."""
+        from src.topic_graph import TopicGraph
+
+        manager = self._build_manager(tmp_path)
+        g = TopicGraph(root_name="Trading", root_query="trading")
+
+        # Depth-1 orphan leaf — pending, will be missed by BFS depth=2 scan
+        orphan = g.add_node(name="Orphan Leaf", query="orphan query", parent_id=g.root.id)
+        g.mark_leaf(orphan.id)
+
+        # Depth-1 non-leaf with one depth-2 child, both already done
+        # so: no pending leaves at depth 2, no consolidation candidates
+        depth1_parent = g.add_node(name="Parent Node", query="parent", parent_id=g.root.id)
+        depth2_child = g.add_node(name="Deep Child", query="deep", parent_id=depth1_parent.id)
+        g.mark_leaf(depth2_child.id)
+        g.mark_researched(depth2_child.id, "deep summary", [])
+        g.mark_consolidated(depth1_parent.id, "consolidated parent")
+
+        manager._graph = g
+        manager._current_research_depth = 2  # loop advanced past orphan's depth
+
+        # Stub _research_node to record the node it was called with
+        researched_nodes = []
+
+        async def fake_research(node):
+            researched_nodes.append(node.name)
+            return None
+
+        manager._research_node = fake_research
+
+        event_loop.run_until_complete(manager.run_graph())
+
+        assert "Orphan Leaf" in researched_nodes
