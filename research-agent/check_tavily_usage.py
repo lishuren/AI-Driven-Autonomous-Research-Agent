@@ -20,7 +20,10 @@ _HISTORY_FILE = Path(__file__).parent / "data" / "tavily_usage_history.jsonl"
 def _load_dotenv(env_path: Path) -> None:
     if not env_path.exists():
         return
-    with env_path.open() as f:
+    # Read file as UTF-8 and fall back safely on undecodable bytes.
+    # Using errors='replace' avoids UnicodeDecodeError on Windows locales
+    # when the .env contains characters outside the system encoding.
+    with env_path.open(encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
