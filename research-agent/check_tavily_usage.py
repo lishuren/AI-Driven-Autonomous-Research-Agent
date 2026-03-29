@@ -278,10 +278,20 @@ def _print_usage(used: int | None, limit: int | None, remaining: int | None, sou
     if remaining is not None:
         print(f"  Remaining : {remaining:>10,}")
 
-    # Progress bar against plan limit
-    bar_used = extra.get("key_usage") if extra and extra.get("key_usage") is not None else used
-    if bar_used is not None and limit is not None and limit > 0:
-        print(f"  Progress  : {_bar(bar_used, limit)}")
+    # Progress bars: show plan-level progress and, when available, per-key progress.
+    # Plan-level progress uses `used / limit` (aggregate across keys).
+    # Key-level progress uses `key_usage / key_limit` when key_limit is provided,
+    # otherwise falls back to showing `key_usage / plan limit` for context.
+    key_usage = extra.get("key_usage") if extra else None
+    key_limit = extra.get("key_limit") if extra else None
+
+    if limit is not None:
+        if used is not None:
+            print(f"  Progress (plan): {_bar(used, limit)}")
+        # show key-specific progress if available
+        if key_usage is not None:
+            key_limit_to_use = key_limit if key_limit is not None else limit
+            print(f"  Progress (this key): {_bar(key_usage, key_limit_to_use)}")
     elif used is not None and remaining is not None:
         total_est = used + remaining
         print(f"  Progress  : {_bar(used, total_est)}  (estimated limit: {total_est:,})")

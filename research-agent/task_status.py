@@ -3,7 +3,7 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
-TASK_JSON = Path(r"D:\Dev\A-Share-Scout\Stock Selection Strategies\output\task.json")
+TASK_JSON = Path(r"D:\Dev\Research\World Service\output\task.json")
 
 # Display order and labels for each status bucket
 _STATUS_ORDER = [
